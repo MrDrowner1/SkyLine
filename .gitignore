@@ -1,0 +1,7 @@
+/build*/
+/dist/
+/stage/
+/runs/
+/local.env
+/build.log
+/media/
