@@ -332,6 +332,13 @@ namespace Frame
 		InterlockedExchangePointer(slot, reinterpret_cast<void*>(&HookedPresent));
 		VirtualProtect(slot, sizeof(void*), old, &old);
 		logger::info("[{:6.1f} s] Present hooked on the game swapchain", Status::Uptime());
+		// An exclusive fullscreen or D3D12 output can hide the child window, this tells which one a report is about.
+		DXGI_SWAP_CHAIN_DESC desc{};
+		BOOL                 fullscreen = FALSE;
+		swapChain->GetDesc(&desc);
+		swapChain->GetFullscreenState(&fullscreen, nullptr);
+		logger::info("[{:6.1f} s] Swapchain: swap effect {}, fullscreen {}, d3d12.dll {}", Status::Uptime(),
+			static_cast<int>(desc.SwapEffect), fullscreen != FALSE, GetModuleHandleW(L"d3d12.dll") != nullptr ? "loaded" : "not loaded");
 		return true;
 	}
 
