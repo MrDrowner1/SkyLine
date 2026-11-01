@@ -1,15 +1,18 @@
 #include "frame.h"
 #include "state.h"
 
-#include <d3d11_1.h>
+#include <d3d11.h>
 #include <dxgi.h>
 
-// Present hook that blends the overlay's premultiplied box into the back buffer in its own ID3DDeviceContextState.
+// Present hook that blends the overlay's premultiplied box into the back buffer, saving and restoring the state it touches.
+// No ID3DDeviceContextState: creating one makes RTSS see a D3D10 device for the rest of the run, and its overlay stays hidden.
 
 namespace
 {
 	using Present_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 	Present_t originalPresent = nullptr;
+	void**    presentSlot = nullptr;
+	bool      unhooked = false;  // render thread only
 
 	std::atomic<bool>          stopped = false;
 	std::atomic<std::int64_t>  lastPresentMs = 0;
@@ -23,9 +26,8 @@ namespace
 	std::uint64_t              pendingVersion = 0;
 
 	// Render thread only.
-	ID3D11Device1*            device = nullptr;
-	ID3D11DeviceContext1*     context = nullptr;
-	ID3DDeviceContextState*   state = nullptr;
+	ID3D11Device*             device = nullptr;
+	ID3D11DeviceContext*      context = nullptr;
 	ID3D11VertexShader*       vs = nullptr;
 	ID3D11PixelShader*        psSrgb = nullptr;    // back buffer stores sRGB-encoded values: write as is
 	ID3D11PixelShader*        psLinear = nullptr;  // _SRGB views and scRGB float: convert to linear
@@ -83,7 +85,6 @@ float4 ps(V i) : SV_Target
 		SafeRelease(psLinear);
 		SafeRelease(psSrgb);
 		SafeRelease(vs);
-		SafeRelease(state);
 		SafeRelease(context);
 		SafeRelease(device);
 	}
@@ -115,22 +116,11 @@ float4 ps(V i) : SV_Target
 
 	bool Init(IDXGISwapChain* a_swapChain)
 	{
-		ID3D11Device* base = nullptr;
-		if (FAILED(a_swapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&base)))) {
+		if (FAILED(a_swapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) {
 			return false;
 		}
-		const auto hr = base->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&device));
-		base->Release();
-		if (FAILED(hr)) {
-			logger::error("No ID3D11Device1, status not drawn into frames");
-			return false;
-		}
-		device->GetImmediateContext1(&context);
+		device->GetImmediateContext(&context);
 		const D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
-		if (FAILED(device->CreateDeviceContextState(0, &level, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), nullptr, &state))) {
-			logger::error("CreateDeviceContextState failed, status not drawn into frames");
-			return false;
-		}
 		auto* vsCode = Compile("vs", "vs_4_0", false);
 		auto* psCode = Compile("ps", "ps_4_0", false);
 		auto* psLinCode = Compile("ps", "ps_4_0", true);
@@ -199,6 +189,78 @@ float4 ps(V i) : SV_Target
 			return false;
 		}
 	}
+
+	// Everything the draw changes. The game tracks its own bindings, so they must be back as they were before Present.
+	struct SavedState
+	{
+		D3D11_PRIMITIVE_TOPOLOGY  topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+		ID3D11InputLayout*        layout = nullptr;
+		ID3D11VertexShader*       vertex = nullptr;
+		ID3D11HullShader*         hull = nullptr;
+		ID3D11DomainShader*       domain = nullptr;
+		ID3D11GeometryShader*     geometry = nullptr;
+		ID3D11PixelShader*        pixel = nullptr;
+		ID3D11ShaderResourceView* resource = nullptr;
+		ID3D11RasterizerState*    rasterizer = nullptr;
+		UINT                      viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+		D3D11_VIEWPORT            viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+		ID3D11BlendState*         blending = nullptr;
+		FLOAT                     blendFactor[4]{};
+		UINT                      sampleMask = 0;
+		ID3D11DepthStencilState*  depth = nullptr;
+		UINT                      stencilRef = 0;
+		ID3D11RenderTargetView*   targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+		ID3D11DepthStencilView*   depthTarget = nullptr;
+
+		void Save()
+		{
+			context->IAGetPrimitiveTopology(&topology);
+			context->IAGetInputLayout(&layout);
+			context->VSGetShader(&vertex, nullptr, nullptr);
+			context->HSGetShader(&hull, nullptr, nullptr);
+			context->DSGetShader(&domain, nullptr, nullptr);
+			context->GSGetShader(&geometry, nullptr, nullptr);
+			context->PSGetShader(&pixel, nullptr, nullptr);
+			context->PSGetShaderResources(0, 1, &resource);
+			context->RSGetState(&rasterizer);
+			context->RSGetViewports(&viewportCount, viewports);
+			context->OMGetBlendState(&blending, blendFactor, &sampleMask);
+			context->OMGetDepthStencilState(&depth, &stencilRef);
+			context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &depthTarget);
+		}
+
+		// Also drops the references Save took.
+		void Restore()
+		{
+			context->IASetPrimitiveTopology(topology);
+			context->IASetInputLayout(layout);
+			context->VSSetShader(vertex, nullptr, 0);
+			context->HSSetShader(hull, nullptr, 0);
+			context->DSSetShader(domain, nullptr, 0);
+			context->GSSetShader(geometry, nullptr, 0);
+			context->PSSetShader(pixel, nullptr, 0);
+			context->PSSetShaderResources(0, 1, &resource);
+			context->RSSetState(rasterizer);
+			context->RSSetViewports(viewportCount, viewports);
+			context->OMSetBlendState(blending, blendFactor, sampleMask);
+			context->OMSetDepthStencilState(depth, stencilRef);
+			context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, depthTarget);
+			SafeRelease(layout);
+			SafeRelease(vertex);
+			SafeRelease(hull);
+			SafeRelease(domain);
+			SafeRelease(geometry);
+			SafeRelease(pixel);
+			SafeRelease(resource);
+			SafeRelease(rasterizer);
+			SafeRelease(blending);
+			SafeRelease(depth);
+			for (auto*& target : targets) {
+				SafeRelease(target);
+			}
+			SafeRelease(depthTarget);
+		}
+	};
 
 	void Draw(IDXGISwapChain* a_swapChain)
 	{
@@ -271,13 +333,16 @@ float4 ps(V i) : SV_Target
 				logger::info("[{:6.1f} s] Status drawn into frames at {},{} ({}x{} in {}x{})", Status::Uptime(), at.x, at.y, width,
 					height, bd.Width, bd.Height);
 			}
-			ID3DDeviceContextState* game = nullptr;
-			context->SwapDeviceContextState(state, &game);
+			SavedState game;
+			game.Save();
 			const D3D11_VIEWPORT vp{ static_cast<float>(at.x), static_cast<float>(at.y), static_cast<float>(width),
 				static_cast<float>(height), 0.0f, 1.0f };
 			context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 			context->IASetInputLayout(nullptr);
 			context->VSSetShader(vs, nullptr, 0);
+			context->HSSetShader(nullptr, nullptr, 0);
+			context->DSSetShader(nullptr, nullptr, 0);
+			context->GSSetShader(nullptr, nullptr, 0);
 			context->PSSetShader(linear ? psLinear : psSrgb, nullptr, 0);
 			context->PSSetShaderResources(0, 1, &view);
 			context->RSSetState(raster);
@@ -286,16 +351,27 @@ float4 ps(V i) : SV_Target
 			context->OMSetDepthStencilState(nullptr, 0);
 			context->OMSetRenderTargets(1, &rtv, nullptr);
 			context->Draw(4, 0);
-			// Unbind before switching back, so our state object keeps no reference to the back buffer.
-			ID3D11RenderTargetView*   noRtv = nullptr;
-			ID3D11ShaderResourceView* noView = nullptr;
-			context->OMSetRenderTargets(1, &noRtv, nullptr);
-			context->PSSetShaderResources(0, 1, &noView);
-			context->SwapDeviceContextState(game, nullptr);
-			SafeRelease(game);
+			game.Restore();
 			rtv->Release();
 		}
 		back->Release();
+	}
+
+	HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags);
+
+	// The hook is only needed while the status is drawn, so the slot goes back to the original. A mod that hooked over us keeps the chain.
+	void Unhook()
+	{
+		DWORD old = 0;
+		if (!VirtualProtect(presentSlot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+			logger::error("VirtualProtect on the swapchain vtable failed ({})", GetLastError());
+			return;
+		}
+		const auto seen = InterlockedCompareExchangePointer(presentSlot, reinterpret_cast<void*>(originalPresent),
+			reinterpret_cast<void*>(&HookedPresent));
+		VirtualProtect(presentSlot, sizeof(void*), old, &old);
+		logger::info("[{:6.1f} s] Present {}", Status::Uptime(),
+			seen == reinterpret_cast<void*>(&HookedPresent) ? "unhooked" : "hooked over by another mod, staying as a pass-through");
 	}
 
 	HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
@@ -304,8 +380,10 @@ float4 ps(V i) : SV_Target
 			if (!stopped) {
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
 				Draw(a_swapChain);
-			} else if (device) {
+			} else if (!unhooked) {
+				unhooked = true;
 				ReleaseAll();
+				Unhook();
 			}
 		}
 		return originalPresent(a_swapChain, a_sync, a_flags);
@@ -329,6 +407,7 @@ namespace Frame
 			return true;  // do not retry
 		}
 		originalPresent = reinterpret_cast<Present_t>(*slot);
+		presentSlot = slot;
 		InterlockedExchangePointer(slot, reinterpret_cast<void*>(&HookedPresent));
 		VirtualProtect(slot, sizeof(void*), old, &old);
 		logger::info("[{:6.1f} s] Present hooked on the game swapchain", Status::Uptime());
