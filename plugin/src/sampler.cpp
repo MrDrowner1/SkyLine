@@ -26,7 +26,7 @@ namespace
 		if (a_module == GetModuleHandleW(nullptr)) {
 			return Module::Kind::kGame;
 		}
-		if (a_nameLower.starts_with("skse64_")) {
+		if (a_nameLower.starts_with("skse64_") || a_nameLower.starts_with("sksevr_")) {
 			return Module::Kind::kSKSE;
 		}
 		return a_pathLower.find("\\skse\\plugins\\") != std::string::npos ? Module::Kind::kPlugin : Module::Kind::kSystem;

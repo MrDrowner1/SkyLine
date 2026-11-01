@@ -317,11 +317,11 @@ namespace
 	void InstallHooks(const SKSE::LoadInterface* a_skse)
 	{
 		const auto game = GetModuleHandleW(nullptr);
-		Patch(game, "SkyrimSE.exe", "CreateFileA", &HookCreateFileA, _CreateFileA);
-		Patch(game, "SkyrimSE.exe", "CreateFileW", &HookCreateFileW, _CreateFileW);
-		Patch(game, "SkyrimSE.exe", "FindFirstFileA", &HookFindFirstFileA, _FindFirstFileA);
-		Patch(game, "SkyrimSE.exe", "FindNextFileA", &HookFindNextFileA, _FindNextFileA);
-		// The load interface lives in the runtime's skse64_1_x_y.dll, whatever the game version.
+		Patch(game, "The game exe", "CreateFileA", &HookCreateFileA, _CreateFileA);
+		Patch(game, "The game exe", "CreateFileW", &HookCreateFileW, _CreateFileW);
+		Patch(game, "The game exe", "FindFirstFileA", &HookFindFirstFileA, _FindFirstFileA);
+		Patch(game, "The game exe", "FindNextFileA", &HookFindNextFileA, _FindNextFileA);
+		// The load interface lives in the runtime's skse64_1_x_y.dll or sksevr_1_4_15.dll, whatever the game version.
 		HMODULE skse = nullptr;
 		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 				reinterpret_cast<LPCWSTR>(a_skse), &skse)) {
@@ -622,6 +622,8 @@ namespace Status
 	}
 }
 
+// The VR build has no version data, so SKSE for AE refuses it instead of loading it on the wrong game.
+#ifndef ENABLE_SKYRIM_VR
 extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() {
 	SKSE::PluginVersionData v;
 	v.PluginVersion({ Version::MAJOR, Version::MINOR, Version::PATCH, 0 });
@@ -632,14 +634,19 @@ extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() {
 	v.UsesNoStructs();
 	return v;
 }();
+#endif
 
-// SKSE for SE 1.5.97 asks this instead of reading SKSEPlugin_Version.
-extern "C" DLLEXPORT bool SKSEPlugin_Query(const SKSE::QueryInterface*, SKSE::PluginInfo* a_info)
+// SKSE for SE 1.5.97 and for VR asks this instead of reading SKSEPlugin_Version.
+extern "C" DLLEXPORT bool SKSEPlugin_Query([[maybe_unused]] const SKSE::QueryInterface* a_skse, SKSE::PluginInfo* a_info)
 {
 	a_info->infoVersion = SKSE::PluginInfo::kVersion;
 	a_info->name = Version::PROJECT.data();
 	a_info->version = REL::Version(Version::MAJOR, Version::MINOR, Version::PATCH).pack();
+#ifdef ENABLE_SKYRIM_VR
+	return a_skse->RuntimeVersion() == SKSE::RUNTIME_VR_1_4_15;
+#else
 	return true;
+#endif
 }
 
 extern "C" DLLEXPORT bool SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
