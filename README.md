@@ -13,6 +13,7 @@ Settings in `SKSE/Plugins/SkyLine.ini`:
 |---|---|
 | `bEnabled` | turns the plugin on or off |
 | `bSplash` | 0 skips the splash window |
+| `iSplashWidth` | splash window width |
 | `sSplashImage` | path to custom splash picture, PNG can be transparent |
 | `bBarOnly` | 1 shows only the progress bar |
 | `bShowDetail` | 0 hides the line with detailed info |

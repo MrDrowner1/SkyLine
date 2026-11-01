@@ -441,7 +441,29 @@ namespace
 	}
 
 	// With an image the splash is the image inside the border, the status drawn over its bottom.
-	SIZE SplashSize() { return picture ? SIZE{ pictureSize.cx + 2, pictureSize.cy + 2 } : SIZE{ Px(480), Px(300) }; }
+	RECT WorkArea()
+	{
+		MONITORINFO mi{ sizeof(mi) };
+		GetMonitorInfoW(MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi);
+		return mi.rcWork;
+	}
+
+	// iSplashWidth and the height, limited to what fits on the primary monitor.
+	SIZE SplashLimit()
+	{
+		const auto wa = WorkArea();
+		return { std::min<LONG>(Px(settings.splashWidth), wa.right - wa.left), wa.bottom - wa.top };
+	}
+
+	SIZE SplashSize()
+	{
+		if (picture) {
+			return { pictureSize.cx + 2, pictureSize.cy + 2 };
+		}
+		const auto limit = SplashLimit();
+		const LONG cx = std::min<LONG>(limit.cx, limit.cy * 8 / 5);
+		return { cx, cx * 5 / 8 };
+	}
 
 	// The pixels of any format WIC decodes (jpg, png, bmp...) as premultiplied 32-bit BGRA.
 	HRESULT DecodeFile(const std::filesystem::path& a_path, std::vector<std::uint32_t>& src, UINT& w, UINT& h)
@@ -522,9 +544,9 @@ namespace
 		return false;
 	}
 
-	// The splash image, else the launcher's, centre-cropped to between 3:1 and 4:3, scaled to a_width with a box
+	// The splash image, else the launcher's, centre-cropped to between 3:1 and 4:3, scaled to fit a_limit with a box
 	// filter since Wine's WIC scaler is nearest neighbour only.
-	HBITMAP LoadPicture(const std::filesystem::path& a_path, int a_width, SIZE& a_size)
+	HBITMAP LoadPicture(const std::filesystem::path& a_path, SIZE a_limit, SIZE& a_size)
 	{
 		UINT                       w = 0, h = 0;
 		std::vector<std::uint32_t> src;
@@ -549,7 +571,8 @@ namespace
 		// The source rectangle: full width unless wider than 3:1, full height unless taller than 4:3.
 		const double sw = std::min<double>(w, h * 3.0), sh = std::min<double>(h, w * 0.75);
 		const double sx = (w - sw) / 2, sy = (h - sh) / 2;
-		const int    cx = a_width, cy = std::max(StatusHeight() + Px(40), static_cast<int>(a_width * sh / sw + 0.5));
+		const int    cx = std::min<int>(a_limit.cx, static_cast<int>(a_limit.cy * sw / sh + 0.5));
+		const int    cy = std::max(StatusHeight() + Px(40), static_cast<int>(cx * sh / sw + 0.5));
 		void*        bits = nullptr;
 		const auto   bmp = CreateDib(cx, cy, bits);
 		if (!bmp) {
@@ -987,11 +1010,8 @@ namespace
 	// Not topmost, draggable anywhere, and reopened where it was left if that is still on a monitor.
 	void CreateSplash()
 	{
-		const auto monitor = MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
-		MONITORINFO mi{ sizeof(mi) };
-		GetMonitorInfoW(monitor, &mi);
-		const auto  size = SplashSize();
-		const auto& wa = mi.rcWork;
+		const auto size = SplashSize();
+		const auto wa = WorkArea();
 		splashAt = { wa.left + (wa.right - wa.left - size.cx) / 2, wa.top + (wa.bottom - wa.top - size.cy) / 2 };
 		if (const auto& p = Status::splashPos) {
 			const RECT r{ p->x, p->y, p->x + size.cx, p->y + size.cy };
@@ -1269,7 +1289,8 @@ namespace
 		if (settings.splash && !FindGameWindow()) {
 			// The splash image replaces the logo. Loaded after the text, which sets the height of its darkened bottom.
 			const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
-			picture = LoadPicture(settings.splashImage, Px(480) - 2, pictureSize);
+			const auto limit = SplashLimit();
+			picture = LoadPicture(settings.splashImage, { limit.cx - 2, limit.cy - 2 }, pictureSize);
 			if (com) {
 				CoUninitialize();
 			}

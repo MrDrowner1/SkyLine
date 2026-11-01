@@ -16,6 +16,7 @@ namespace Overlay
 		int      barLength = 360;  // px at 96 dpi, 0 spans the game window
 		bool     showDetail = true;  // the second line (times, counts, file names)
 		bool     splash = true;      // the splash window before the game window exists
+		int      splashWidth = 480;  // px at 96 dpi
 		COLORREF textColor = RGB(236, 236, 236);  // the detail line is drawn a little dimmer
 	};
 

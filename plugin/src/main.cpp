@@ -521,6 +521,7 @@ namespace
 		s.barOnly = get(L"bBarOnly", 0) != 0;
 		s.showDetail = get(L"bShowDetail", 1) != 0;
 		s.splash = get(L"bSplash", 1) != 0;
+		s.splashWidth = std::clamp(get(L"iSplashWidth", s.splashWidth), 240, 8192);
 		s.barHeight = std::clamp(get(L"iBarHeight", s.barHeight), 1, 64);
 		s.barLength = get(L"iBarLength", s.barLength) <= 0 ? 0 : std::clamp(get(L"iBarLength", s.barLength), 50, 8192);
 		s.offset = { std::clamp(get(L"iOffsetX", 0), -8192, 8192), std::clamp(get(L"iOffsetY", 0), -8192, 8192) };
@@ -559,8 +560,8 @@ namespace
 			}
 		}
 		const auto hex = [](COLORREF a_c) { return std::format("{:02X}{:02X}{:02X}", GetRValue(a_c), GetGValue(a_c), GetBValue(a_c)); };
-		logger::info("Settings: font {} px, linger {} s, splash {}, bar only {}, detail {}, bar {}x{} colour {}, text colour {}, "
-			"position {},{} offset {},{}", s.fontSize, s.lingerSeconds, s.splash, s.barOnly, s.showDetail, s.barLength, s.barHeight,
+		logger::info("Settings: font {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} colour {}, text colour {}, "
+			"position {},{} offset {},{}", s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
 			hex(s.barColor), hex(s.textColor), s.anchor.x, s.anchor.y, s.offset.x, s.offset.y);
 		return s;
 	}
