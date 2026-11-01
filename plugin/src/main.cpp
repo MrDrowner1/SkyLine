@@ -177,22 +177,30 @@ namespace
 	decltype(&CreateFileA) _CreateFileA;
 	decltype(&CreateFileW) _CreateFileW;
 
+	// Only opens that succeed count. The game probes every Skyrim.ccc entry and archive name whether it exists or not.
+
 	HANDLE WINAPI HookCreateFileA(LPCSTR a_name, DWORD a_access, DWORD a_share, LPSECURITY_ATTRIBUTES a_sa, DWORD a_disp,
 		DWORD a_flags, HANDLE a_template)
 	{
-		if (a_name && !Status::done.load(std::memory_order_relaxed)) {
+		const auto handle = _CreateFileA(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
+		if (handle != INVALID_HANDLE_VALUE && a_name && !Status::done.load(std::memory_order_relaxed)) {
+			const auto error = GetLastError();
 			OnFileOpen(a_name);
+			SetLastError(error);
 		}
-		return _CreateFileA(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
+		return handle;
 	}
 
 	HANDLE WINAPI HookCreateFileW(LPCWSTR a_name, DWORD a_access, DWORD a_share, LPSECURITY_ATTRIBUTES a_sa, DWORD a_disp,
 		DWORD a_flags, HANDLE a_template)
 	{
-		if (a_name && !Status::done.load(std::memory_order_relaxed)) {
+		const auto handle = _CreateFileW(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
+		if (handle != INVALID_HANDLE_VALUE && a_name && !Status::done.load(std::memory_order_relaxed)) {
+			const auto error = GetLastError();
 			OnFileOpen(Narrow(a_name));
+			SetLastError(error);
 		}
-		return _CreateFileW(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
+		return handle;
 	}
 
 	// The engine indexes every loose file below Data\ before the game window exists, one FindFirstFileA per folder.
