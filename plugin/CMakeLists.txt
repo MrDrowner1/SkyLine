@@ -1,6 +1,6 @@
 # SkyLine: startup status line for Skyrim SE 1.5.97 and AE 1.6.317+ (CommonLibSSE-NG v12, clang-cl cross-build).
 cmake_minimum_required(VERSION 3.21)
-project(SkyLine VERSION 1.0.0 LANGUAGES CXX)
+project(SkyLine VERSION 1.0.1 LANGUAGES CXX)
 configure_file(cmake/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/Version.h @ONLY)
 # Static CRT (with the x64-windows-static-clangcl triplet), so Windows needs no VC++ runtime of a matching version.
 set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
