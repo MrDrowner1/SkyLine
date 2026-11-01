@@ -21,6 +21,8 @@ namespace
 	HICON             logo = nullptr;
 	HBITMAP           picture = nullptr;  // the splash image at its drawn size, else the logo is shown
 	SIZE              pictureSize{};
+	const std::uint32_t* picturePixels = nullptr;  // premultiplied, owned by picture
+	bool                 pictureAlpha = false;     // has transparent pixels, the splash is a layered window then
 	HWND              game = nullptr;
 	RECT              gameRect{};
 	HFONT             headFont = nullptr;
@@ -441,7 +443,7 @@ namespace
 	// With an image the splash is the image inside the border, the status drawn over its bottom.
 	SIZE SplashSize() { return picture ? SIZE{ pictureSize.cx + 2, pictureSize.cy + 2 } : SIZE{ Px(480), Px(300) }; }
 
-	// The pixels of any format WIC decodes (jpg, png, bmp...) as 32-bit BGR.
+	// The pixels of any format WIC decodes (jpg, png, bmp...) as premultiplied 32-bit BGRA.
 	HRESULT DecodeFile(const std::filesystem::path& a_path, std::vector<std::uint32_t>& src, UINT& w, UINT& h)
 	{
 		IWICImagingFactory*    factory = nullptr;
@@ -464,7 +466,7 @@ namespace
 			hr = factory->CreateFormatConverter(&converter);
 		}
 		if (SUCCEEDED(hr)) {
-			hr = converter->Initialize(frame, GUID_WICPixelFormat32bppBGR, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
+			hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
 		}
 		if (SUCCEEDED(hr)) {
 			hr = converter->GetSize(&w, &h);
@@ -539,6 +541,9 @@ namespace
 				return nullptr;
 			}
 			name = "launcher image";
+			for (auto& p : src) {
+				p |= 0xFF000000;  // GetDIBits leaves the alpha byte undefined
+			}
 		}
 
 		// The source rectangle: full width unless wider than 3:1, full height unless taller than 4:3.
@@ -555,16 +560,19 @@ namespace
 			const int y0 = static_cast<int>(sy + sh * y / cy), y1 = std::max(y0 + 1, static_cast<int>(sy + sh * (y + 1) / cy));
 			for (int x = 0; x < cx; ++x) {
 				const int x0 = static_cast<int>(sx + sw * x / cx), x1 = std::max(x0 + 1, static_cast<int>(sx + sw * (x + 1) / cx));
-				std::uint32_t sum[3]{}, n = 0;
+				std::uint32_t sum[4]{}, n = 0;
 				for (int v = y0; v < std::min<int>(y1, h); ++v) {
 					for (int u = x0; u < std::min<int>(x1, w); ++u, ++n) {
 						const auto p = src[std::size_t(v) * w + u];
 						sum[0] += p & 0xFF;
 						sum[1] += (p >> 8) & 0xFF;
 						sum[2] += (p >> 16) & 0xFF;
+						sum[3] += p >> 24;
 					}
 				}
-				out[std::size_t(y) * cx + x] = n ? (sum[0] / n) | (sum[1] / n) << 8 | (sum[2] / n) << 16 : 0;
+				const auto a = n ? sum[3] / n : 0;
+				out[std::size_t(y) * cx + x] = n ? (sum[0] / n) | (sum[1] / n) << 8 | (sum[2] / n) << 16 | a << 24 : 0;
+				pictureAlpha |= a < 255;
 			}
 		}
 		// Darkened towards the bottom behind the status text, so it stays readable on bright images.
@@ -574,11 +582,12 @@ namespace
 			const auto   keep = static_cast<std::uint32_t>(256 * (1.0 - 0.7 * f * f * (3 - 2 * f)));
 			for (int x = 0; x < cx; ++x) {
 				auto& p = out[std::size_t(y) * cx + x];
-				p = ((p & 0xFF) * keep >> 8) | (((p >> 8) & 0xFF) * keep >> 8) << 8 | (((p >> 16) & 0xFF) * keep >> 8) << 16;
+				p = ((p & 0xFF) * keep >> 8) | (((p >> 8) & 0xFF) * keep >> 8) << 8 | (((p >> 16) & 0xFF) * keep >> 8) << 16 | (p & 0xFF000000);
 			}
 		}
 		a_size = { cx, cy };
-		logger::info("Splash image {} ({}x{}) shown at {}x{}", name, w, h, cx, cy);
+		picturePixels = out;
+		logger::info("Splash image {} ({}x{}) shown at {}x{}{}", name, w, h, cx, cy, pictureAlpha ? ", see-through" : "");
 		return bmp;
 	}
 
@@ -677,10 +686,159 @@ namespace
 		DrawButtons(mem);
 	}
 
+	// A soft dark glow around the text coverage: two box blurs each way, then boosted so it is dense next to the strokes.
+	std::vector<std::uint8_t> Halo(const std::vector<std::uint8_t>& a_cover, LONG a_w, LONG a_h)
+	{
+		const int                  r = std::max(1, Px(3));
+		std::vector<std::uint32_t> a(a_cover.begin(), a_cover.end());
+		std::vector<std::uint32_t> b(a.size());
+		const auto blur = [&](std::vector<std::uint32_t>& a_src, std::vector<std::uint32_t>& a_dst, LONG a_len, LONG a_lines, std::size_t a_step, std::size_t a_stride) {
+			for (LONG l = 0; l < a_lines; ++l) {
+				const std::size_t base = l * a_stride;
+				for (LONG i = 0; i < a_len; ++i) {
+					std::uint32_t sum = 0;
+					for (LONG k = std::max(0L, i - r); k <= std::min(a_len - 1, i + static_cast<LONG>(r)); ++k) {
+						sum += a_src[base + k * a_step];
+					}
+					a_dst[base + i * a_step] = sum / (2 * r + 1);
+				}
+			}
+		};
+		for (int pass = 0; pass < 2; ++pass) {
+			blur(a, b, a_w, a_h, 1, a_w);
+			blur(b, a, a_h, a_w, a_w, 1);
+		}
+		std::vector<std::uint8_t> out(a.size());
+		for (std::size_t i = 0; i < a.size(); ++i) {
+			out[i] = static_cast<std::uint8_t>(std::min<std::uint32_t>(a[i] * 4, 255) * 200 / 255);
+		}
+		return out;
+	}
+
+	// Premultiplied text lines: a colour pass on black plus an all-white pass whose grayscale coverage is the alpha.
+	std::vector<std::uint32_t> TextPixels(SIZE a_size, bool a_splash)
+	{
+		void*      bits = nullptr;
+		const auto bmp = CreateDib(a_size.cx, a_size.cy, bits);
+		if (!bmp) {
+			return {};
+		}
+		const auto  mem = CreateCompatibleDC(nullptr);
+		const auto  oldBmp = SelectObject(mem, bmp);
+		const RECT  rc{ 0, 0, a_size.cx, a_size.cy };
+		const auto* px = static_cast<const std::uint32_t*>(bits);
+		const auto  n = static_cast<std::size_t>(a_size.cx) * a_size.cy;
+
+		Fill(mem, rc, RGB(0, 0, 0));
+		DrawLines(mem, rc, false, false, a_splash);
+		GdiFlush();
+		std::vector<std::uint32_t> out(px, px + n);
+		Fill(mem, rc, RGB(0, 0, 0));
+		DrawLines(mem, rc, true, false, a_splash);
+		GdiFlush();
+		std::vector<std::uint8_t> cover(n);
+		for (std::size_t i = 0; i < n; ++i) {
+			cover[i] = static_cast<std::uint8_t>((px[i] >> 8) & 0xFF);
+		}
+		const auto halo = Halo(cover, a_size.cx, a_size.cy);
+		for (std::size_t i = 0; i < n; ++i) {
+			const std::uint32_t a = cover[i];
+			const auto          c = out[i];
+			const auto          ch = [&](int a_shift) { return std::min<std::uint32_t>((c >> a_shift) & 0xFF, a) << a_shift; };
+			// The text over its black halo, so it reads on bright frames like the Bethesda logo.
+			const std::uint32_t alpha = a + halo[i] * (255 - a) / 255;
+			out[i] = ch(0) | ch(8) | ch(16) | (alpha << 24);
+		}
+		SelectObject(mem, oldBmp);
+		DeleteDC(mem);
+		DeleteObject(bmp);
+		return out;
+	}
+
+	// A see-through image: the window takes premultiplied pixels, GDI writes no alpha so it is set here for what GDI draws.
+	void PresentLayered()
+	{
+		RECT rc{};
+		GetClientRect(splash, &rc);
+		void*      bits = nullptr;
+		const auto bmp = CreateDib(rc.right, rc.bottom, bits);
+		if (!bmp) {
+			return;
+		}
+		const auto mem = CreateCompatibleDC(nullptr);
+		const auto oldBmp = SelectObject(mem, bmp);
+		auto*      px = static_cast<std::uint32_t*>(bits);
+		const auto at = [&](LONG a_x, LONG a_y) -> std::uint32_t& { return px[std::size_t(a_y) * rc.right + a_x]; };
+		const auto mix = [](std::uint32_t a_top, std::uint32_t a_under) {
+			const std::uint32_t keep = 255 - (a_top >> 24);
+			std::uint32_t       out = 0;
+			for (const int shift : { 0, 8, 16, 24 }) {
+				out |= (((a_top >> shift) & 0xFF) + ((a_under >> shift) & 0xFF) * keep / 255) << shift;
+			}
+			return out;
+		};
+		const auto opaque = [&](const RECT& a_r) {
+			for (LONG y = a_r.top; y < a_r.bottom; ++y) {
+				for (LONG x = a_r.left; x < a_r.right; ++x) {
+					at(x, y) |= 0xFF000000;
+				}
+			}
+		};
+
+		for (LONG y = 0; y < pictureSize.cy; ++y) {
+			std::copy_n(picturePixels + std::size_t(y) * pictureSize.cx, pictureSize.cx, &at(1, y + 1));
+		}
+		const RECT box{ 1, rc.bottom - StatusHeight() - 1, rc.right - 1, rc.bottom - 1 };
+		const SIZE boxSize{ box.right - box.left, box.bottom - box.top };
+		if (const auto text = TextPixels(boxSize, true); !text.empty()) {
+			for (LONG y = 0; y < boxSize.cy; ++y) {
+				for (LONG x = 0; x < boxSize.cx; ++x) {
+					auto& p = at(box.left + x, box.top + y);
+					p = mix(text[std::size_t(y) * boxSize.cx + x], p);
+				}
+			}
+		}
+		// The buttons get an opaque backing, they could not be seen or clicked over a transparent part of the image.
+		const auto minimize = ButtonRect(Button::Minimize);
+		const auto close = ButtonRect(Button::Close);
+		const RECT buttons{ minimize.left, minimize.top, close.right, close.bottom };
+		for (LONG y = buttons.top; y < buttons.bottom; ++y) {
+			for (LONG x = buttons.left; x < buttons.right; ++x) {
+				auto& p = at(x, y);
+				p = mix(p, 0xFF121214);
+			}
+		}
+		const auto track = BarTrack(box, true);
+		Fill(mem, track, Track);
+		Fill(mem, BarFill(box, true), settings.barColor);
+		DrawButtons(mem);
+		GdiFlush();
+		opaque(track);
+		opaque(buttons);
+
+		SIZE          size{ rc.right, rc.bottom };
+		POINT         from{};
+		BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+		if (!UpdateLayeredWindow(splash, nullptr, nullptr, &size, mem, &from, 0, &blend, ULW_ALPHA)) {
+			static bool logged = false;
+			if (!std::exchange(logged, true)) {
+				logger::error("UpdateLayeredWindow failed ({})", GetLastError());
+			}
+		}
+		SelectObject(mem, oldBmp);
+		DeleteDC(mem);
+		DeleteObject(bmp);
+	}
+
 	void Paint(HWND a_hwnd)
 	{
 		PAINTSTRUCT ps;
 		const auto  dc = BeginPaint(a_hwnd, &ps);
+		if (a_hwnd == splash && pictureAlpha) {
+			PresentLayered();
+			EndPaint(a_hwnd, &ps);
+			return;
+		}
 		RECT        rc;
 		GetClientRect(a_hwnd, &rc);
 		const auto mem = CreateCompatibleDC(dc);
@@ -843,7 +1001,7 @@ namespace
 		}
 		// A normal app window, so it is in the taskbar and alt-tab (Wine leaves NOACTIVATE windows out of both).
 		// WS_MINIMIZEBOX tells the window manager (via Wine's Motif hints) that it may be minimized.
-		splash = CreateWindowExW(WS_EX_APPWINDOW, ClassName, L"Skyrim startup", WS_POPUP | WS_MINIMIZEBOX, splashAt.x,
+		splash = CreateWindowExW(WS_EX_APPWINDOW | (pictureAlpha ? WS_EX_LAYERED : 0), ClassName, L"Skyrim startup", WS_POPUP | WS_MINIMIZEBOX, splashAt.x,
 			splashAt.y, size.cx, size.cy, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
 		if (!splash) {
 			logger::error("CreateWindowEx (splash) failed ({})", GetLastError());
@@ -854,6 +1012,9 @@ namespace
 			if (const auto icon = LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), IMAGE_ICON, px, px, LR_SHARED)) {
 				SendMessageW(splash, WM_SETICON, type, reinterpret_cast<LPARAM>(icon));
 			}
+		}
+		if (pictureAlpha) {
+			PresentLayered();  // a layered window shows nothing until it has pixels
 		}
 		// Activated like any starting program, KWin keeps a new window that is not activated behind the active one.
 		ShowWindow(splash, SW_SHOW);
@@ -881,70 +1042,15 @@ namespace
 		TerminateProcess(GetCurrentProcess(), 0);
 	}
 
-	// A soft dark glow around the text coverage: two box blurs each way, then boosted so it is dense next to the strokes.
-	std::vector<std::uint8_t> Halo(const std::vector<std::uint8_t>& a_cover, LONG a_w, LONG a_h)
-	{
-		const int                  r = std::max(1, Px(3));
-		std::vector<std::uint32_t> a(a_cover.begin(), a_cover.end());
-		std::vector<std::uint32_t> b(a.size());
-		const auto blur = [&](std::vector<std::uint32_t>& a_src, std::vector<std::uint32_t>& a_dst, LONG a_len, LONG a_lines, std::size_t a_step, std::size_t a_stride) {
-			for (LONG l = 0; l < a_lines; ++l) {
-				const std::size_t base = l * a_stride;
-				for (LONG i = 0; i < a_len; ++i) {
-					std::uint32_t sum = 0;
-					for (LONG k = std::max(0L, i - r); k <= std::min(a_len - 1, i + static_cast<LONG>(r)); ++k) {
-						sum += a_src[base + k * a_step];
-					}
-					a_dst[base + i * a_step] = sum / (2 * r + 1);
-				}
-			}
-		};
-		for (int pass = 0; pass < 2; ++pass) {
-			blur(a, b, a_w, a_h, 1, a_w);
-			blur(b, a, a_h, a_w, a_w, 1);
-		}
-		std::vector<std::uint8_t> out(a.size());
-		for (std::size_t i = 0; i < a.size(); ++i) {
-			out[i] = static_cast<std::uint8_t>(std::min<std::uint32_t>(a[i] * 4, 255) * 200 / 255);
-		}
-		return out;
-	}
-
-	// Premultiplied pixels for the Present hook: a colour pass on black plus an all-white pass whose grayscale coverage is the alpha.
+	// Premultiplied pixels for the Present hook.
 	void PublishFrame()
 	{
 		const auto size = BoxSize();
-		void*      bits = nullptr;
-		const auto bmp = CreateDib(size.cx, size.cy, bits);
-		if (!bmp) {
+		auto       out = TextPixels(size, false);
+		if (out.empty()) {
 			return;
 		}
-		const auto  mem = CreateCompatibleDC(nullptr);
-		const auto  oldBmp = SelectObject(mem, bmp);
-		const RECT  rc{ 0, 0, size.cx, size.cy };
-		const auto* px = static_cast<const std::uint32_t*>(bits);
-		const auto  n = static_cast<std::size_t>(size.cx) * size.cy;
-
-		Fill(mem, rc, RGB(0, 0, 0));
-		DrawLines(mem, rc, false, false);
-		GdiFlush();
-		std::vector<std::uint32_t> out(px, px + n);
-		Fill(mem, rc, RGB(0, 0, 0));
-		DrawLines(mem, rc, true, false);
-		GdiFlush();
-		std::vector<std::uint8_t> cover(n);
-		for (std::size_t i = 0; i < n; ++i) {
-			cover[i] = static_cast<std::uint8_t>((px[i] >> 8) & 0xFF);
-		}
-		const auto halo = Halo(cover, size.cx, size.cy);
-		for (std::size_t i = 0; i < n; ++i) {
-			const std::uint32_t a = cover[i];
-			const auto          c = out[i];
-			const auto          ch = [&](int a_shift) { return std::min<std::uint32_t>((c >> a_shift) & 0xFF, a) << a_shift; };
-			// The text over its black halo, so it reads on bright frames like the Bethesda logo.
-			const std::uint32_t alpha = a + halo[i] * (255 - a) / 255;
-			out[i] = ch(0) | ch(8) | ch(16) | (alpha << 24);
-		}
+		const RECT rc{ 0, 0, size.cx, size.cy };
 		// Opaque, so the track stays visible over dark loading screens.
 		const auto opaque = [](COLORREF a_c) { return 0xFF000000u | (GetRValue(a_c) << 16) | (GetGValue(a_c) << 8) | GetBValue(a_c); };
 		const auto put = [&](const RECT& a_r, std::uint32_t a_pixel) {
@@ -957,9 +1063,6 @@ namespace
 		put(BarTrack(rc, false), opaque(Track));
 		put(BarFill(rc, false), opaque(settings.barColor));
 		Frame::Publish(std::move(out), size.cx, size.cy, Where());
-		SelectObject(mem, oldBmp);
-		DeleteDC(mem);
-		DeleteObject(bmp);
 	}
 
 	HWND FindGameWindow()

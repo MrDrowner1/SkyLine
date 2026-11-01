@@ -1,5 +1,5 @@
 {
   "name": "skyline",
-  "version-string": "1.0.1",
+  "version-string": "1.1.0",
   "dependencies": ["commonlibsse-ng", "spdlog"]
 }
