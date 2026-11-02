@@ -104,4 +104,6 @@ namespace Status
 	inline std::optional<POINT> splashPos;  // where the splash was dragged to
 	// Rewrites SkyLine.yaml with a_last and splashPos.
 	void SaveState(const LastStart& a_last);
+	// Hooks the game exe's CreateWindowEx imports to close the splash first, false if it imports neither.
+	bool HookGameWindow();
 }

@@ -890,10 +890,17 @@ namespace
 		}
 	}
 
+	constexpr UINT    CloseSplashMsg = WM_APP + 1;
+	std::atomic<HWND> hookedSplash = nullptr;  // under Wine's Wayland driver, closed just before the game creates its window
+	void              DestroySplash();
+
 	LRESULT CALLBACK WndProc(HWND a_hwnd, UINT a_msg, WPARAM a_wp, LPARAM a_lp)
 	{
 		const POINT pt{ GET_X_LPARAM(a_lp), GET_Y_LPARAM(a_lp) };
 		switch (a_msg) {
+		case CloseSplashMsg:
+			DestroySplash();
+			return 0;
 		case WM_PAINT:
 			if (a_hwnd == window || a_hwnd == splash) {
 				Paint(a_hwnd);
@@ -1042,6 +1049,7 @@ namespace
 
 	void DestroySplash()
 	{
+		hookedSplash = nullptr;
 		if (splash) {
 			RECT r{};
 			GetWindowRect(splash, &r);
@@ -1220,9 +1228,11 @@ namespace
 		const bool   nowPresenting = last > 0 && Status::Uptime() - last < 2.0;  // hitches of a second are normal
 		if (nowPresenting != presenting) {
 			presenting = nowPresenting;
-			logger::info("[{:6.1f} s] Game {}, status {}", Status::Uptime(),
-				presenting ? "presenting frames" : "stopped presenting", presenting ? "drawn into frames" : "in window");
-			if (window) {
+			// Wine's Wayland driver keeps showing a child brought back over frames, even after it is hidden and destroyed.
+			const bool stayHidden = !presenting && GetModuleHandleW(L"winewayland.drv") != nullptr;
+			logger::info("[{:6.1f} s] Game {}, status {}", Status::Uptime(), presenting ? "presenting frames" : "stopped presenting",
+				presenting ? "drawn into frames" : stayHidden ? "stays in the last frame" : "in window");
+			if (window && !stayHidden) {
 				ShowWindow(window, presenting ? SW_HIDE : SW_SHOWNA);
 			}
 		}
@@ -1286,7 +1296,15 @@ namespace
 			Status::Uptime(), dpi, Status::last.stages ? "from last start" : "in equal steps", splashEstimate.end[0],
 			splashEstimate.end[1], gameEstimate.end[0], gameEstimate.end[1], gameEstimate.end[2]);
 		ComposeText();
-		if (settings.splash && !FindGameWindow()) {
+		// Wine's Wayland driver makes the game window a popup of the active window, and destroying that parent ends the Wayland connection and the game.
+		// So there the splash has to be gone before the game creates its window.
+		const bool waylandDriver = GetModuleHandleW(L"winewayland.drv") != nullptr;
+		bool       showSplash = settings.splash && !FindGameWindow();
+		if (showSplash && waylandDriver && !Status::HookGameWindow()) {
+			logger::warn("Wine's Wayland driver is in use and the game window can't be hooked, no splash");
+			showSplash = false;
+		}
+		if (showSplash) {
 			// The splash image replaces the logo. Loaded after the text, which sets the height of its darkened bottom.
 			const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
 			const auto limit = SplashLimit();
@@ -1295,6 +1313,9 @@ namespace
 				CoUninitialize();
 			}
 			CreateSplash();
+			if (waylandDriver) {
+				hookedSplash = splash;
+			}
 		}
 		// With a timer proc, so ticks go on inside any modal loop of the thread.
 		timer = SetTimer(nullptr, 0, TickMs, [](HWND, UINT, UINT_PTR, DWORD) { Tick(); });
@@ -1318,6 +1339,16 @@ namespace
 
 namespace Overlay
 {
+	void CloseSplash()
+	{
+		// Only the overlay thread can destroy it. The timeout keeps the game from hanging here.
+		if (const auto s = hookedSplash.exchange(nullptr)) {
+			DWORD_PTR result = 0;
+			const auto sent = SendMessageTimeoutW(s, CloseSplashMsg, 0, 0, SMTO_NORMAL, 2000, &result);
+			logger::info("[{:6.1f} s] Splash closed before the game window{}", Status::Uptime(), sent ? "" : " timed out");
+		}
+	}
+
 	void Start(const Settings& a_settings)
 	{
 		settings = a_settings;
