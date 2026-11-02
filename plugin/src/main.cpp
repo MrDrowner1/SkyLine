@@ -541,6 +541,7 @@ namespace
 		};
 		s.barOnly = get(L"bBarOnly", 0) != 0;
 		s.showDetail = get(L"bShowDetail", 1) != 0;
+		s.textShadow = get(L"bTextShadow", 1) != 0;
 		s.splash = get(L"bSplash", 1) != 0;
 		s.splashWidth = std::clamp(get(L"iSplashWidth", s.splashWidth), 240, 8192);
 		s.barHeight = std::clamp(get(L"iBarHeight", s.barHeight), 1, 64);
@@ -581,9 +582,9 @@ namespace
 			}
 		}
 		const auto hex = [](COLORREF a_c) { return std::format("{:02X}{:02X}{:02X}", GetRValue(a_c), GetGValue(a_c), GetBValue(a_c)); };
-		logger::info("Settings: font {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} colour {}, text colour {}, "
+		logger::info("Settings: font {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} color {}, text color {}, text shadow {}, "
 			"position {},{} offset {},{}", s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
-			hex(s.barColor), hex(s.textColor), s.anchor.x, s.anchor.y, s.offset.x, s.offset.y);
+			hex(s.barColor), hex(s.textColor), s.textShadow, s.anchor.x, s.anchor.y, s.offset.x, s.offset.y);
 		return s;
 	}
 

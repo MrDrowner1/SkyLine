@@ -17,8 +17,9 @@ Settings in `SKSE/Plugins/SkyLine.ini`:
 | `sSplashImage` | path to custom splash picture, PNG can be transparent |
 | `bBarOnly` | 1 shows only the progress bar |
 | `bShowDetail` | 0 hides the line with detailed info |
-| `iFontSize`, `sTextColor` | text size and colour |
-| `iBarHeight`, `iBarLength`, `sBarColor` | bar size and colour |
+| `iFontSize`, `sTextColor` | text size and color |
+| `bTextShadow` | 0 removes the shadow behind the text |
+| `iBarHeight`, `iBarLength`, `sBarColor` | bar size and color |
 | `sPosition`, `iOffsetX`, `iOffsetY` | position and offset |
 | `iLingerSeconds` | for how many seconds to keep the overlay after the game is loaded |
 | `bLog` | enable/disable log |

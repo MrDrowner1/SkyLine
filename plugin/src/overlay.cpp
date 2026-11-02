@@ -705,7 +705,7 @@ namespace
 			const int top = std::max(Px(16), static_cast<int>(rc.bottom - statusHeight - logoSize) / 2);
 			DrawIconEx(mem, (rc.right - logoSize) / 2, top, logo, logoSize, logoSize, 0, nullptr, DI_NORMAL);
 		}
-		DrawStatus(mem, { rc.left + 1, rc.bottom - statusHeight - 1, rc.right - 1, rc.bottom - 1 }, true, picture != nullptr);
+		DrawStatus(mem, { rc.left + 1, rc.bottom - statusHeight - 1, rc.right - 1, rc.bottom - 1 }, true, picture != nullptr && settings.textShadow);
 		DrawButtons(mem);
 	}
 
@@ -738,7 +738,7 @@ namespace
 		return out;
 	}
 
-	// Premultiplied text lines: a colour pass on black plus an all-white pass whose grayscale coverage is the alpha.
+	// Premultiplied text lines: a color pass on black plus an all-white pass whose grayscale coverage is the alpha.
 	std::vector<std::uint32_t> TextPixels(SIZE a_size, bool a_splash)
 	{
 		void*      bits = nullptr;
@@ -763,7 +763,7 @@ namespace
 		for (std::size_t i = 0; i < n; ++i) {
 			cover[i] = static_cast<std::uint8_t>((px[i] >> 8) & 0xFF);
 		}
-		const auto halo = Halo(cover, a_size.cx, a_size.cy);
+		const auto halo = settings.textShadow ? Halo(cover, a_size.cx, a_size.cy) : std::vector<std::uint8_t>(n);
 		for (std::size_t i = 0; i < n; ++i) {
 			const std::uint32_t a = cover[i];
 			const auto          c = out[i];

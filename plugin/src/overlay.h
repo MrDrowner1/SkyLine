@@ -18,6 +18,7 @@ namespace Overlay
 		bool     splash = true;      // the splash window before the game window exists
 		int      splashWidth = 480;  // px at 96 dpi
 		COLORREF textColor = RGB(236, 236, 236);  // the detail line is drawn a little dimmer
+		bool     textShadow = true;  // the drop shadow on the splash text and the glow around the text over frames
 	};
 
 	// Starts the overlay thread (own window + message loop, so it keeps updating while the game threads are busy).
