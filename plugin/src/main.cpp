@@ -588,9 +588,15 @@ namespace
 		return s;
 	}
 
-	// bLog=0 leaves the log file alone and drops every message.
+	// bLog=0 leaves the log file alone and drops every message. Query and Load both call this, only the first one opens the log.
 	void InitializeLog()
 	{
+		static bool done = false;
+		if (std::exchange(done, true)) {
+			return;
+		}
+		GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCWSTR>(&InitializeLog), &self);
 		auto path = logger::log_directory();
 		if (const auto ini = IniPath(); !path || (!ini.empty() && !GetPrivateProfileIntW(L"Overlay", L"bLog", 1, ini.c_str()))) {
 			auto off = std::make_shared<spdlog::logger>("global log"s);
@@ -675,7 +681,13 @@ extern "C" DLLEXPORT bool SKSEPlugin_Query([[maybe_unused]] const SKSE::QueryInt
 	a_info->name = Version::PROJECT.data();
 	a_info->version = REL::Version(Version::MAJOR, Version::MINOR, Version::PATCH).pack();
 #ifdef ENABLE_SKYRIM_VR
-	return a_skse->RuntimeVersion() == SKSE::RUNTIME_VR_1_4_15;
+	// Any 1.4 runtime is VR, SE is 1.5 and AE 1.6 or later.
+	InitializeLog();
+	const auto runtime = a_skse->RuntimeVersion();
+	const bool accepted = runtime.major() == 1 && runtime.minor() == 4;
+	logger::info("Query: {} {}, SKSE {:08X}, runtime {}, {}", Version::PROJECT, Version::NAME, a_skse->SKSEVersion(), runtime.string(),
+		accepted ? "accepted"sv : "refused"sv);
+	return accepted;
 #else
 	return true;
 #endif
@@ -683,24 +695,39 @@ extern "C" DLLEXPORT bool SKSEPlugin_Query([[maybe_unused]] const SKSE::QueryInt
 
 extern "C" DLLEXPORT bool SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 {
-	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		reinterpret_cast<LPCWSTR>(&InitializeLog), &self);
 	InitializeLog();
-	SKSE::Init(a_skse, { .log = false });
+	// The step goes to the log first, SKSE catches a fault in here and only says the plugin failed.
+	const auto step = [](std::string_view a_name) { logger::info("Load: {}", a_name); };
+	try {
+		step("SKSE init"sv);
+		SKSE::Init(a_skse, { .log = false });
 
-	const auto game = REL::Module::get().version();
-	logger::info("[{:6.1f} s] {} {} (game {})", Status::Uptime(), Version::PROJECT, Version::NAME, game.string());
-	const auto settings = LoadSettings();
-	if (!settings.enabled) {
-		logger::info("bEnabled=0 in SkyLine.ini; nothing to do");
+		step("game version"sv);
+		const auto game = REL::Module::get().version();
+		logger::info("[{:6.1f} s] {} {} (game {})", Status::Uptime(), Version::PROJECT, Version::NAME, game.string());
+		step("settings"sv);
+		const auto settings = LoadSettings();
+		if (!settings.enabled) {
+			logger::info("bEnabled=0 in SkyLine.ini; nothing to do");
+			return true;
+		}
+
+		step("state"sv);
+		LoadState();
+		Status::mainThread = GetCurrentThreadId();
+		Sampler::SetSelf(self);
+		step("hooks"sv);
+		InstallHooks(a_skse);
+		step("messaging listener"sv);
+		SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
+		step("overlay"sv);
+		Overlay::Start(settings);
+		step("done"sv);
 		return true;
+	} catch (const std::exception& e) {
+		logger::error("Load failed: {}", e.what());
+	} catch (...) {
+		logger::error("Load failed: unknown exception");
 	}
-
-	LoadState();
-	Status::mainThread = GetCurrentThreadId();
-	Sampler::SetSelf(self);
-	InstallHooks(a_skse);
-	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
-	Overlay::Start(settings);
-	return true;
+	return false;
 }
