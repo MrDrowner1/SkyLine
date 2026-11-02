@@ -12,7 +12,8 @@ namespace
 	using Present_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 	Present_t originalPresent = nullptr;
 	void**    presentSlot = nullptr;
-	bool      unhooked = false;  // render thread only
+	bool      unhooked = false;         // render thread only
+	bool      loggedSwapChain = false;  // render thread only
 
 	std::atomic<bool>          stopped = false;
 	std::atomic<std::int64_t>  lastPresentMs = 0;
@@ -374,10 +375,27 @@ float4 ps(V i) : SV_Target
 			seen == reinterpret_cast<void*>(&HookedPresent) ? "unhooked" : "hooked over by another mod, staying as a pass-through");
 	}
 
+	// An exclusive fullscreen or D3D12 output can hide the child window, this tells which one a report is about.
+	// Runs on the game's own thread, since a report's log stopped at these calls when the overlay thread made them.
+	void LogSwapChain(IDXGISwapChain* a_swapChain)
+	{
+		logger::info("[{:6.1f} s] First Present on thread {} (main thread {})", Status::Uptime(), GetCurrentThreadId(), Status::mainThread.load());
+		DXGI_SWAP_CHAIN_DESC desc{};
+		BOOL                 fullscreen = FALSE;
+		a_swapChain->GetDesc(&desc);
+		a_swapChain->GetFullscreenState(&fullscreen, nullptr);
+		logger::info("[{:6.1f} s] Swapchain: swap effect {}, fullscreen {}, d3d12.dll {}", Status::Uptime(),
+			static_cast<int>(desc.SwapEffect), fullscreen != FALSE, GetModuleHandleW(L"d3d12.dll") != nullptr ? "loaded" : "not loaded");
+	}
+
 	HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
 	{
 		if (!(a_flags & DXGI_PRESENT_TEST)) {
 			if (!stopped) {
+				if (!loggedSwapChain) {
+					loggedSwapChain = true;
+					LogSwapChain(a_swapChain);
+				}
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
 				Draw(a_swapChain);
 			} else if (!unhooked) {
@@ -411,13 +429,6 @@ namespace Frame
 		InterlockedExchangePointer(slot, reinterpret_cast<void*>(&HookedPresent));
 		VirtualProtect(slot, sizeof(void*), old, &old);
 		logger::info("[{:6.1f} s] Present hooked on the game swapchain", Status::Uptime());
-		// An exclusive fullscreen or D3D12 output can hide the child window, this tells which one a report is about.
-		DXGI_SWAP_CHAIN_DESC desc{};
-		BOOL                 fullscreen = FALSE;
-		swapChain->GetDesc(&desc);
-		swapChain->GetFullscreenState(&fullscreen, nullptr);
-		logger::info("[{:6.1f} s] Swapchain: swap effect {}, fullscreen {}, d3d12.dll {}", Status::Uptime(),
-			static_cast<int>(desc.SwapEffect), fullscreen != FALSE, GetModuleHandleW(L"d3d12.dll") != nullptr ? "loaded" : "not loaded");
 		return true;
 	}
 
