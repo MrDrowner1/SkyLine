@@ -22,4 +22,6 @@ namespace Overlay
 
 	// Starts the overlay thread (own window + message loop, so it keeps updating while the game threads are busy).
 	void Start(const Settings& a_settings);
+	// Called on the game's thread just before it creates its window, only hooked under Wine's Wayland driver.
+	void CloseSplash();
 }

@@ -314,6 +314,27 @@ namespace
 		}
 	}
 
+	decltype(&CreateWindowExA) _CreateWindowExA;
+	decltype(&CreateWindowExW) _CreateWindowExW;
+
+	HWND WINAPI HookCreateWindowExA(DWORD a_exStyle, LPCSTR a_class, LPCSTR a_name, DWORD a_style, int a_x, int a_y, int a_width,
+		int a_height, HWND a_parent, HMENU a_menu, HINSTANCE a_instance, LPVOID a_param)
+	{
+		if (!a_parent) {
+			Overlay::CloseSplash();
+		}
+		return _CreateWindowExA(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
+	}
+
+	HWND WINAPI HookCreateWindowExW(DWORD a_exStyle, LPCWSTR a_class, LPCWSTR a_name, DWORD a_style, int a_x, int a_y, int a_width,
+		int a_height, HWND a_parent, HMENU a_menu, HINSTANCE a_instance, LPVOID a_param)
+	{
+		if (!a_parent) {
+			Overlay::CloseSplash();
+		}
+		return _CreateWindowExW(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
+	}
+
 	void InstallHooks(const SKSE::LoadInterface* a_skse)
 	{
 		const auto game = GetModuleHandleW(nullptr);
@@ -588,6 +609,16 @@ namespace
 
 namespace Status
 {
+	bool HookGameWindow()
+	{
+		const auto game = GetModuleHandleW(nullptr);
+		_CreateWindowExA = reinterpret_cast<decltype(&CreateWindowExA)>(
+			PatchImport(game, "USER32.dll", "CreateWindowExA", reinterpret_cast<void*>(&HookCreateWindowExA)));
+		_CreateWindowExW = reinterpret_cast<decltype(&CreateWindowExW)>(
+			PatchImport(game, "USER32.dll", "CreateWindowExW", reinterpret_cast<void*>(&HookCreateWindowExW)));
+		return _CreateWindowExA || _CreateWindowExW;
+	}
+
 	double ScanEstimate()
 	{
 		const auto it = std::ranges::find(scanFolders, shared.scanTop);
