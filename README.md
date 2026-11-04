@@ -19,6 +19,7 @@ Settings in `SKSE/Plugins/SkyLine.ini`:
 | `bShowDetail` | 0 hides the line with detailed info |
 | `iFontSize`, `sTextColor` | text size and color |
 | `bTextShadow` | 0 removes the shadow behind the text |
+| `bDpiScaling` | 0 ignores Windows display scaling |
 | `iBarHeight`, `iBarLength`, `sBarColor` | bar size and color |
 | `sPosition`, `iOffsetX`, `iOffsetY` | position and offset |
 | `iLingerSeconds` | for how many seconds to keep the overlay after the game is loaded |

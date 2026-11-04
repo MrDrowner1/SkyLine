@@ -1274,7 +1274,7 @@ namespace
 		const auto dc = GetDC(nullptr);
 		const int  dpi = GetDeviceCaps(dc, LOGPIXELSY);
 		ReleaseDC(nullptr, dc);
-		scalePct = std::clamp(dpi * 100 / 96, 100, 400);
+		scalePct = settings.dpiScaling ? std::clamp(dpi * 100 / 96, 100, 400) : 100;
 
 		const auto font = [](int a_px, int a_weight) {
 			return CreateFontW(-Px(a_px), 0, 0, 0, a_weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
