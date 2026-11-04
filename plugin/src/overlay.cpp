@@ -1196,6 +1196,12 @@ namespace
 				windowAt = Status::Uptime();
 				gameEstimate.entered[0] = windowAt;
 				scanFiles = Status::looseFiles;
+				// A splash shown behind another app never had focus but is active on this thread, and the child window's input link would make it the active window the game sets its keyboard up with.
+				if (splash && GetActiveWindow() == splash && GetForegroundWindow() != splash) {
+					DestroySplash();
+					logger::info("[{:6.1f} s] Splash closed early, it was active but not in front", Status::Uptime());
+				}
+
 				CreateOverlay(game);
 			}
 		} else if (!IsWindow(game)) {
