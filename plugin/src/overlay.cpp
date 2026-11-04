@@ -23,6 +23,13 @@ namespace
 	SIZE              pictureSize{};
 	const std::uint32_t* picturePixels = nullptr;  // premultiplied, owned by picture
 	bool                 pictureAlpha = false;     // has transparent pixels, the splash is a layered window then
+	std::vector<std::uint32_t> coverSource;        // the decoded cover image, kept in case the game window changes size
+	SIZE                 coverSourceSize{};
+	HBITMAP              coverBitmap = nullptr;    // the cover image at the size of the game window
+	SIZE                 coverSize{};
+	const std::uint32_t* coverPixels = nullptr;    // owned by coverBitmap
+	bool                 coverOn = false;          // loaded and the main menu hasn't opened yet
+	RECT                 coverBox{};               // where the status was last painted over the cover
 	HWND              game = nullptr;
 	RECT              gameRect{};
 	HFONT             headFont = nullptr;
@@ -351,6 +358,10 @@ namespace
 		}
 		RECT area{};
 		GetClientRect(game, &area);
+		if (coverOn) {
+			SetWindowPos(window, nullptr, area.left, area.top, area.right - area.left, area.bottom - area.top, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+			return;
+		}
 		const auto size = BoxSize();
 		const auto at = Frame::Place({ area.right - area.left, area.bottom - area.top }, size, Where());
 		SetWindowPos(window, nullptr, area.left + at.x, area.top + at.y, size.cx, size.cy, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
@@ -614,6 +625,119 @@ namespace
 		return bmp;
 	}
 
+	// Per target pixel, the source pixels of a tent filter as wide as the scale: it blends when enlarging and averages when shrinking.
+	struct Taps
+	{
+		struct Tap
+		{
+			int         first;
+			int         count;
+			std::size_t weights;
+		};
+		std::vector<Tap>   taps;
+		std::vector<float> weights;
+
+		Taps(int a_from, int a_to)
+		{
+			const double scale = double(a_from) / a_to;
+			const double radius = std::max(1.0, scale);
+			taps.reserve(a_to);
+			for (int i = 0; i < a_to; ++i) {
+				const double center = (i + 0.5) * scale - 0.5;
+				const int    first = std::max(0, static_cast<int>(std::ceil(center - radius)));
+				const int    last = std::min(a_from - 1, static_cast<int>(std::floor(center + radius)));
+				const auto   at = weights.size();
+				double       sum = 0;
+				for (int s = first; s <= last; ++s) {
+					const double w = std::max(0.0, 1.0 - std::abs(s - center) / radius);
+					weights.push_back(static_cast<float>(w));
+					sum += w;
+				}
+				for (auto k = at; k < weights.size(); ++k) {
+					weights[k] = static_cast<float>(weights[k] / sum);
+				}
+				taps.push_back({ first, last - first + 1, at });
+			}
+		}
+	};
+
+	// The cover image stretched to a_size, aspect ratio ignored. Opaque, so a transparent part of it shows black, not the game.
+	bool ScaleCover(SIZE a_size)
+	{
+		void*      bits = nullptr;
+		const auto bmp = CreateDib(a_size.cx, a_size.cy, bits);
+		if (!bmp) {
+			logger::error("Cover image bitmap {}x{} failed", a_size.cx, a_size.cy);
+			return false;
+		}
+		const int  w = coverSourceSize.cx, h = coverSourceSize.cy, cx = a_size.cx, cy = a_size.cy;
+		const Taps across(w, cx), down(h, cy);
+		// Across each source row first, 3 channels at 8.8 fixed point.
+		std::vector<std::uint16_t> rows(std::size_t(cx) * h * 3);
+		for (int y = 0; y < h; ++y) {
+			const auto* src = coverSource.data() + std::size_t(y) * w;
+			auto*       row = rows.data() + std::size_t(y) * cx * 3;
+			for (int x = 0; x < cx; ++x) {
+				const auto& t = across.taps[x];
+				float       sum[3]{};
+				for (int k = 0; k < t.count; ++k) {
+					const auto  p = src[t.first + k];
+					const float weight = across.weights[t.weights + k];
+					sum[0] += weight * (p & 0xFF);
+					sum[1] += weight * ((p >> 8) & 0xFF);
+					sum[2] += weight * ((p >> 16) & 0xFF);
+				}
+				for (int c = 0; c < 3; ++c) {
+					row[x * 3 + c] = static_cast<std::uint16_t>(sum[c] * 256.0f);
+				}
+			}
+		}
+		// Then down each column, a whole row at a time.
+		auto*              out = static_cast<std::uint32_t*>(bits);
+		std::vector<float> sum(std::size_t(cx) * 3);
+		for (int y = 0; y < cy; ++y) {
+			std::ranges::fill(sum, 0.0f);
+			const auto& t = down.taps[y];
+			for (int k = 0; k < t.count; ++k) {
+				const auto* row = rows.data() + std::size_t(t.first + k) * cx * 3;
+				const float weight = down.weights[t.weights + k];
+				for (std::size_t i = 0; i < sum.size(); ++i) {
+					sum[i] += weight * row[i];
+				}
+			}
+			for (int x = 0; x < cx; ++x) {
+				const auto channel = [&](int a_c) { return std::min<std::uint32_t>(static_cast<std::uint32_t>(sum[std::size_t(x) * 3 + a_c] / 256.0f + 0.5f), 255); };
+				out[std::size_t(y) * cx + x] = channel(0) | channel(1) << 8 | channel(2) << 16 | 0xFF000000u;
+			}
+		}
+		if (coverBitmap) {
+			DeleteObject(coverBitmap);
+		}
+		coverBitmap = bmp;
+		coverPixels = out;
+		coverSize = a_size;
+		logger::info("[{:6.1f} s] Cover image ({}x{}) scaled to {}x{}", Status::Uptime(), w, h, cx, cy);
+		return true;
+	}
+
+	// Scaled ahead for the primary monitor, a full screen game window then has it ready the moment it appears.
+	void LoadCover()
+	{
+		UINT       w = 0, h = 0;
+		const auto name = SKSE::stl::utf16_to_utf8(settings.coverImage.filename().native()).value_or("?"s);
+		if (const auto hr = DecodeFile(settings.coverImage, coverSource, w, h); FAILED(hr)) {
+			logger::warn("Cover image {} not loaded ({:08X})", name, static_cast<std::uint32_t>(hr));
+			coverSource = {};
+			return;
+		}
+		coverSourceSize = { static_cast<LONG>(w), static_cast<LONG>(h) };
+		logger::info("[{:6.1f} s] Cover image {} loaded", Status::Uptime(), name);
+		coverOn = ScaleCover({ GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) });
+		if (!coverOn) {
+			coverSource = {};
+		}
+	}
+
 	// Minimize and close buttons in the splash's top right corner.
 	enum class Button
 	{
@@ -778,6 +902,17 @@ namespace
 		return out;
 	}
 
+	// Premultiplied a_top over a_under.
+	std::uint32_t Mix(std::uint32_t a_top, std::uint32_t a_under)
+	{
+		const std::uint32_t keep = 255 - (a_top >> 24);
+		std::uint32_t       out = 0;
+		for (const int shift : { 0, 8, 16, 24 }) {
+			out |= (((a_top >> shift) & 0xFF) + ((a_under >> shift) & 0xFF) * keep / 255) << shift;
+		}
+		return out;
+	}
+
 	// A see-through image: the window takes premultiplied pixels, GDI writes no alpha so it is set here for what GDI draws.
 	void PresentLayered()
 	{
@@ -792,14 +927,6 @@ namespace
 		const auto oldBmp = SelectObject(mem, bmp);
 		auto*      px = static_cast<std::uint32_t*>(bits);
 		const auto at = [&](LONG a_x, LONG a_y) -> std::uint32_t& { return px[std::size_t(a_y) * rc.right + a_x]; };
-		const auto mix = [](std::uint32_t a_top, std::uint32_t a_under) {
-			const std::uint32_t keep = 255 - (a_top >> 24);
-			std::uint32_t       out = 0;
-			for (const int shift : { 0, 8, 16, 24 }) {
-				out |= (((a_top >> shift) & 0xFF) + ((a_under >> shift) & 0xFF) * keep / 255) << shift;
-			}
-			return out;
-		};
 		const auto opaque = [&](const RECT& a_r) {
 			for (LONG y = a_r.top; y < a_r.bottom; ++y) {
 				for (LONG x = a_r.left; x < a_r.right; ++x) {
@@ -817,7 +944,7 @@ namespace
 			for (LONG y = 0; y < boxSize.cy; ++y) {
 				for (LONG x = 0; x < boxSize.cx; ++x) {
 					auto& p = at(box.left + x, box.top + y);
-					p = mix(text[std::size_t(y) * boxSize.cx + x], p);
+					p = Mix(text[std::size_t(y) * boxSize.cx + x], p);
 				}
 			}
 		}
@@ -828,7 +955,7 @@ namespace
 		for (LONG y = buttons.top; y < buttons.bottom; ++y) {
 			for (LONG x = buttons.left; x < buttons.right; ++x) {
 				auto& p = at(x, y);
-				p = mix(p, 0xFF121214);
+				p = Mix(p, 0xFF121214);
 			}
 		}
 		const auto track = BarTrack(box, true);
@@ -853,12 +980,19 @@ namespace
 		DeleteObject(bmp);
 	}
 
+	void PaintCover(HDC a_dc);
+
 	void Paint(HWND a_hwnd)
 	{
 		PAINTSTRUCT ps;
 		const auto  dc = BeginPaint(a_hwnd, &ps);
 		if (a_hwnd == splash && pictureAlpha) {
 			PresentLayered();
+			EndPaint(a_hwnd, &ps);
+			return;
+		}
+		if (a_hwnd == window && coverOn) {
+			PaintCover(dc);
 			EndPaint(a_hwnd, &ps);
 			return;
 		}
@@ -1010,6 +1144,8 @@ namespace
 		}
 		Layout();
 		ShowWindow(window, SW_SHOWNA);
+		// Painted here, after an early splash close this thread's messages can wait seconds for the busy game thread.
+		UpdateWindow(window);
 	}
 
 	POINT splashAt{};
@@ -1070,13 +1206,12 @@ namespace
 		TerminateProcess(GetCurrentProcess(), 0);
 	}
 
-	// Premultiplied pixels for the Present hook.
-	void PublishFrame()
+	// The status box as premultiplied pixels, for the Present hook and for painting over the cover image.
+	std::vector<std::uint32_t> BoxPixels(SIZE size)
 	{
-		const auto size = BoxSize();
-		auto       out = TextPixels(size, false);
+		auto out = TextPixels(size, false);
 		if (out.empty()) {
-			return;
+			return out;
 		}
 		const RECT rc{ 0, 0, size.cx, size.cy };
 		// Opaque, so the track stays visible over dark loading screens.
@@ -1090,7 +1225,97 @@ namespace
 		};
 		put(BarTrack(rc, false), opaque(Track));
 		put(BarFill(rc, false), opaque(settings.barColor));
-		Frame::Publish(std::move(out), size.cx, size.cy, Where());
+		return out;
+	}
+
+	void PublishFrame()
+	{
+		const auto size = BoxSize();
+		if (auto out = BoxPixels(size); !out.empty()) {
+			Frame::Publish(std::move(out), size.cx, size.cy, Where());
+		}
+	}
+
+	// Where the status goes over the cover image.
+	RECT CoverStatusRect()
+	{
+		RECT area{};
+		GetClientRect(game, &area);
+		const auto size = BoxSize();
+		const auto at = Frame::Place({ area.right, area.bottom }, size, Where());
+		return { at.x, at.y, at.x + size.cx, at.y + size.cy };
+	}
+
+	// Only the status changes, so it is the only part rebuilt. The same pixels as in frames, so it doesn't change when they start.
+	void PaintCover(HDC a_dc)
+	{
+		const auto box = CoverStatusRect();
+		const SIZE size{ box.right - box.left, box.bottom - box.top };
+		coverBox = box;
+		if (size.cx > 0 && size.cy > 0) {
+			void*      bits = nullptr;
+			const auto bmp = CreateDib(size.cx, size.cy, bits);
+			const auto text = bmp ? BoxPixels(size) : std::vector<std::uint32_t>{};
+			if (!text.empty()) {
+				auto* out = static_cast<std::uint32_t*>(bits);
+				for (LONG y = 0; y < size.cy; ++y) {
+					for (LONG x = 0; x < size.cx; ++x) {
+						const LONG cx = box.left + x, cy = box.top + y;
+						const auto under = cx < coverSize.cx && cy < coverSize.cy ? coverPixels[std::size_t(cy) * coverSize.cx + cx] : 0xFF000000u;
+						out[std::size_t(y) * size.cx + x] = Mix(text[std::size_t(y) * size.cx + x], under);
+					}
+				}
+				GdiFlush();
+				const auto mem = CreateCompatibleDC(a_dc);
+				const auto old = SelectObject(mem, bmp);
+				BitBlt(a_dc, box.left, box.top, size.cx, size.cy, mem, 0, 0, SRCCOPY);
+				SelectObject(mem, old);
+				DeleteDC(mem);
+				ExcludeClipRect(a_dc, box.left, box.top, box.right, box.bottom);
+			}
+			if (bmp) {
+				DeleteObject(bmp);
+			}
+		}
+		const auto mem = CreateCompatibleDC(a_dc);
+		const auto old = SelectObject(mem, coverBitmap);
+		BitBlt(a_dc, 0, 0, coverSize.cx, coverSize.cy, mem, 0, 0, SRCCOPY);
+		SelectObject(mem, old);
+		DeleteDC(mem);
+	}
+
+	// A plain cut, whatever iLingerSeconds says: the main menu is live now and must not stay hidden.
+	void EndCover()
+	{
+		coverOn = false;
+		Frame::StopCover();
+		coverSource = {};
+		DeleteObject(coverBitmap);
+		coverBitmap = nullptr;
+		coverPixels = nullptr;
+		logger::info("[{:6.1f} s] Cover image closed", Status::Uptime());
+		if (window) {
+			Layout();
+			InvalidateRect(window, nullptr, FALSE);
+		}
+	}
+
+	// Keeps the cover at the size of the game window. A minimized window has no client area, the cover stays as it was then.
+	void SyncCover(const RECT& a_client)
+	{
+		const SIZE size{ a_client.right - a_client.left, a_client.bottom - a_client.top };
+		if (!coverOn || size.cx <= 0 || size.cy <= 0) {
+			return;
+		}
+		if ((size.cx != coverSize.cx || size.cy != coverSize.cy) && !ScaleCover(size)) {
+			EndCover();
+			return;
+		}
+		static SIZE published{};
+		if (published.cx != coverSize.cx || published.cy != coverSize.cy) {
+			published = coverSize;
+			Frame::PublishCover({ coverPixels, coverPixels + std::size_t(coverSize.cx) * coverSize.cy }, coverSize.cx, coverSize.cy);
+		}
 	}
 
 	HWND FindGameWindow()
@@ -1122,8 +1347,17 @@ namespace
 		return s.best;
 	}
 
+	constexpr std::uint64_t CoverHandoverFrames = 3;
+	constexpr double        CoverHandoverSeconds = 0.3;
+	constexpr UINT          CoverWatchMs = 10;
+	UINT_PTR                coverWatch = 0;  // finds the game window sooner than a tick, it shows black until the cover is over it
+
 	void Tick()
 	{
+		if (coverWatch && (game || !coverOn)) {
+			KillTimer(nullptr, coverWatch);
+			coverWatch = 0;
+		}
 		static int ticks = 0;
 		++ticks;
 		if (ticks % 10 == 1) {
@@ -1185,6 +1419,10 @@ namespace
 			PostQuitMessage(0);
 			return;
 		}
+		// The main menu can open before data is loaded, the startup isn't finished then but the cover ends all the same.
+		if (coverOn && (closing || Status::mainMenu)) {
+			EndCover();
+		}
 
 		if (!game) {
 			if (const auto g = FindGameWindow()) {
@@ -1202,6 +1440,9 @@ namespace
 					logger::info("[{:6.1f} s] Splash closed early, it was active but not in front", Status::Uptime());
 				}
 
+				RECT client{};
+				GetClientRect(game, &client);
+				SyncCover(client);
 				CreateOverlay(game);
 			}
 		} else if (!IsWindow(game)) {
@@ -1225,13 +1466,25 @@ namespace
 		RECT now{};
 		if (game) {
 			GetClientRect(game, &now);
+			SyncCover(now);
 		}
 		if (game && !hooked) {
 			hooked = Frame::TryHook();
 		}
 		// The game is presenting frames: draw into them instead of the child window (which they would cover).
 		const double last = Frame::LastPresent();
-		const bool   nowPresenting = last > 0 && Status::Uptime() - last < 2.0;  // hitches of a second are normal
+		const bool   flowing = last > 0 && Status::Uptime() - last < 2.0;  // hitches of a second are normal
+		static bool          wasFlowing = false;
+		static std::uint64_t flowingFrom = 0;
+		static double        flowingAt = 0;
+		const bool           flowStarted = flowing && !wasFlowing;
+		if (flowStarted) {
+			flowingFrom = Frame::Presented();
+			flowingAt = Status::Uptime();
+		}
+		wasFlowing = flowing;
+		// A presented frame takes a moment to reach the screen, hiding the child over the cover at once showed a black flash.
+		const bool nowPresenting = flowing && (!coverOn || (Frame::Presented() - flowingFrom >= CoverHandoverFrames && Status::Uptime() - flowingAt >= CoverHandoverSeconds));
 		if (nowPresenting != presenting) {
 			presenting = nowPresenting;
 			// Wine's Wayland driver keeps showing a child brought back over frames, even after it is hidden and destroyed.
@@ -1245,15 +1498,25 @@ namespace
 		if (splash && changed) {
 			InvalidateRect(splash, nullptr, FALSE);
 		}
+		const bool resized = !EqualRect(&now, &gameRect);
+		// Published while the child is still up too, so the status is in the frames by the time it goes.
+		if (flowing && (changed || resized || flowStarted)) {
+			PublishFrame();
+		}
 		if (presenting) {
-			if (changed || !EqualRect(&now, &gameRect)) {
-				gameRect = now;
-				PublishFrame();
-			}
-		} else if (window && (changed || !EqualRect(&now, &gameRect))) {
+			gameRect = now;
+		} else if (window && (changed || resized)) {
 			gameRect = now;
 			Layout();
-			InvalidateRect(window, nullptr, FALSE);
+			if (coverOn && !resized) {
+				// The whole cover would be redrawn at 10/s for a few changed pixels.
+				const auto box = CoverStatusRect();
+				RECT       dirty{};
+				UnionRect(&dirty, &coverBox, &box);
+				InvalidateRect(window, &dirty, FALSE);
+			} else {
+				InvalidateRect(window, nullptr, FALSE);
+			}
 		}
 	}
 
@@ -1310,14 +1573,19 @@ namespace
 			logger::warn("Wine's Wayland driver is in use and the game window can't be hooked, no splash");
 			showSplash = false;
 		}
+		const bool com = (showSplash || !settings.coverImage.empty()) && SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
 		if (showSplash) {
 			// The splash image replaces the logo. Loaded after the text, which sets the height of its darkened bottom.
-			const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
 			const auto limit = SplashLimit();
 			picture = LoadPicture(settings.splashImage, { limit.cx - 2, limit.cy - 2 }, pictureSize);
-			if (com) {
-				CoUninitialize();
-			}
+		}
+		if (!settings.coverImage.empty()) {
+			LoadCover();
+		}
+		if (com) {
+			CoUninitialize();
+		}
+		if (showSplash) {
 			CreateSplash();
 			if (waylandDriver) {
 				hookedSplash = splash;
@@ -1325,6 +1593,13 @@ namespace
 		}
 		// With a timer proc, so ticks go on inside any modal loop of the thread.
 		timer = SetTimer(nullptr, 0, TickMs, [](HWND, UINT, UINT_PTR, DWORD) { Tick(); });
+		if (coverOn) {
+			coverWatch = SetTimer(nullptr, 0, CoverWatchMs, [](HWND, UINT, UINT_PTR, DWORD) {
+				if (!game && FindGameWindow()) {
+					Tick();
+				}
+			});
+		}
 
 		MSG msg;
 		while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

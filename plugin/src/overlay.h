@@ -8,6 +8,7 @@ namespace Overlay
 		int  lingerSeconds = 0;
 		bool enabled = true;
 		std::filesystem::path splashImage;  // empty shows the game's dragon icon
+		std::filesystem::path coverImage;   // stretched over the game window until the main menu, empty for none
 		bool     barOnly = false;  // only the progress bar, no text lines
 		COLORREF barColor = RGB(110, 180, 230);
 		POINT    anchor{ 0, 2 };  // place in the game window per axis: 0 left/top, 1 centre, 2 right/bottom

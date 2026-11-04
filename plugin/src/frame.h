@@ -9,6 +9,9 @@ namespace Frame
 	// Seconds since start of the last frame the game presented (0 = none yet).
 	double LastPresent();
 
+	// How many frames have been presented through the hook.
+	std::uint64_t Presented();
+
 	// Where the box goes: per axis anchor 0 start, 1 centre, 2 end, margin px from that edge, then moved by offset px.
 	struct Spot
 	{
@@ -29,6 +32,12 @@ namespace Frame
 
 	// The box as top-down premultiplied BGRA (alpha 0 = game shows through), blended at a_spot.
 	void Publish(std::vector<std::uint32_t> a_bgra, int a_width, int a_height, const Spot& a_spot);
+
+	// The cover image as top-down opaque BGRA, stretched over the whole frame under the box.
+	void PublishCover(std::vector<std::uint32_t> a_bgra, int a_width, int a_height);
+
+	// Stop drawing the cover image, the box stays.
+	void StopCover();
 
 	// Stop drawing. The hook stays as a pass-through, since another mod may have hooked over it.
 	void Stop();

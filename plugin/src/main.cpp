@@ -528,6 +528,10 @@ namespace
 		if (*image) {
 			s.splashImage = ini.parent_path() / image;
 		}
+		GetPrivateProfileStringW(L"Overlay", L"sCoverImage", L"", image, static_cast<DWORD>(std::size(image)), ini.c_str());
+		if (*image) {
+			s.coverImage = ini.parent_path() / image;
+		}
 		const auto text = [&](const wchar_t* a_key) {
 			wchar_t v[64];
 			GetPrivateProfileStringW(L"Overlay", a_key, L"", v, static_cast<DWORD>(std::size(v)), ini.c_str());
@@ -583,8 +587,8 @@ namespace
 			}
 		}
 		const auto hex = [](COLORREF a_c) { return std::format("{:02X}{:02X}{:02X}", GetRValue(a_c), GetGValue(a_c), GetBValue(a_c)); };
-		logger::info("Settings: font {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} color {}, text color {}, text shadow {}, dpi scaling {}, "
-			"position {},{} offset {},{}", s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
+		logger::info("Settings: font {} px, linger {} s, splash {} width {}, cover image {}, bar only {}, detail {}, bar {}x{} color {}, text color {}, text shadow {}, dpi scaling {}, "
+			"position {},{} offset {},{}", s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, !s.coverImage.empty(), s.barOnly, s.showDetail, s.barLength, s.barHeight,
 			hex(s.barColor), hex(s.textColor), s.textShadow, s.dpiScaling, s.anchor.x, s.anchor.y, s.offset.x, s.offset.y);
 		return s;
 	}

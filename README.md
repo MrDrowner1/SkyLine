@@ -15,6 +15,7 @@ Settings in `SKSE/Plugins/SkyLine.ini`:
 | `bSplash` | 0 skips the splash window |
 | `iSplashWidth` | splash window width |
 | `sSplashImage` | path to custom splash picture, PNG can be transparent |
+| `sCoverImage` | path to a picture stretched over the Skyrim window until the main menu |
 | `bBarOnly` | 1 shows only the progress bar |
 | `bShowDetail` | 0 hides the line with detailed info |
 | `iFontSize`, `sTextColor` | text size and color |

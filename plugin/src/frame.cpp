@@ -17,6 +17,7 @@ namespace
 
 	std::atomic<bool>          stopped = false;
 	std::atomic<std::int64_t>  lastPresentMs = 0;
+	std::atomic<std::uint64_t> presented = 0;
 
 	// Published by the overlay thread.
 	std::mutex                 pending;
@@ -25,6 +26,10 @@ namespace
 	int                        pendingHeight = 0;
 	Frame::Spot                pendingSpot;
 	std::uint64_t              pendingVersion = 0;
+	std::vector<std::uint32_t> pendingCover;
+	int                        pendingCoverWidth = 0;
+	int                        pendingCoverHeight = 0;
+	std::atomic<bool>          coverStopped = false;
 
 	// Render thread only.
 	ID3D11Device*             device = nullptr;
@@ -43,6 +48,12 @@ namespace
 	bool                      failed = false;
 	POINT                     loggedAt{ -1, -1 };
 	bool                      loggedFormat = false;
+	ID3D11PixelShader*        coverSrgb = nullptr;    // only set up when a cover image is used
+	ID3D11PixelShader*        coverLinear = nullptr;
+	ID3D11SamplerState*       coverSampler = nullptr;
+	ID3D11Texture2D*          coverTexture = nullptr;
+	ID3D11ShaderResourceView* coverView = nullptr;
+	bool                      coverFailed = false;
 
 	constexpr char Shader[] = R"(
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD; };
@@ -54,17 +65,25 @@ V vs(uint id : SV_VertexID)
 	return o;
 }
 Texture2D<float4> tex : register(t0);
-float4 ps(V i) : SV_Target
+SamplerState      linearSampler : register(s0);
+float4 Output(float4 c)
 {
-	uint w, h;
-	tex.GetDimensions(w, h);
-	float4 c = tex.Load(int3(i.uv * float2(w, h), 0));
 #if LINEAR
 	float3 s = c.a > 0 ? c.rgb / c.a : 0;
 	s = s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4);
 	c.rgb = s * c.a;
 #endif
 	return c;
+}
+float4 ps(V i) : SV_Target
+{
+	uint w, h;
+	tex.GetDimensions(w, h);
+	return Output(tex.Load(int3(i.uv * float2(w, h), 0)));
+}
+float4 cover(V i) : SV_Target
+{
+	return Output(tex.Sample(linearSampler, i.uv));
 }
 )";
 
@@ -79,6 +98,11 @@ float4 ps(V i) : SV_Target
 
 	void ReleaseAll()
 	{
+		SafeRelease(coverView);
+		SafeRelease(coverTexture);
+		SafeRelease(coverSampler);
+		SafeRelease(coverLinear);
+		SafeRelease(coverSrgb);
 		SafeRelease(view);
 		SafeRelease(texture);
 		SafeRelease(raster);
@@ -156,6 +180,23 @@ float4 ps(V i) : SV_Target
 		return ok;
 	}
 
+	bool InitCover()
+	{
+		auto* srgbCode = Compile("cover", "ps_4_0", false);
+		auto* linearCode = Compile("cover", "ps_4_0", true);
+		D3D11_SAMPLER_DESC sd{};
+		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sd.MaxLOD = D3D11_FLOAT32_MAX;
+		const bool ok = srgbCode && linearCode &&
+		                SUCCEEDED(device->CreatePixelShader(srgbCode->GetBufferPointer(), srgbCode->GetBufferSize(), nullptr, &coverSrgb)) &&
+		                SUCCEEDED(device->CreatePixelShader(linearCode->GetBufferPointer(), linearCode->GetBufferSize(), nullptr, &coverLinear)) &&
+		                SUCCEEDED(device->CreateSamplerState(&sd, &coverSampler));
+		SafeRelease(srgbCode);
+		SafeRelease(linearCode);
+		return ok;
+	}
+
 	// The render target view format for the back buffer, and whether the shader must write linear values.
 	bool ViewFormat(DXGI_FORMAT a_format, DXGI_FORMAT& a_view, bool& a_linear)
 	{
@@ -202,6 +243,7 @@ float4 ps(V i) : SV_Target
 		ID3D11GeometryShader*     geometry = nullptr;
 		ID3D11PixelShader*        pixel = nullptr;
 		ID3D11ShaderResourceView* resource = nullptr;
+		ID3D11SamplerState*       samplerState = nullptr;
 		ID3D11RasterizerState*    rasterizer = nullptr;
 		UINT                      viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
 		D3D11_VIEWPORT            viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
@@ -223,6 +265,7 @@ float4 ps(V i) : SV_Target
 			context->GSGetShader(&geometry, nullptr, nullptr);
 			context->PSGetShader(&pixel, nullptr, nullptr);
 			context->PSGetShaderResources(0, 1, &resource);
+			context->PSGetSamplers(0, 1, &samplerState);
 			context->RSGetState(&rasterizer);
 			context->RSGetViewports(&viewportCount, viewports);
 			context->OMGetBlendState(&blending, blendFactor, &sampleMask);
@@ -241,6 +284,7 @@ float4 ps(V i) : SV_Target
 			context->GSSetShader(geometry, nullptr, 0);
 			context->PSSetShader(pixel, nullptr, 0);
 			context->PSSetShaderResources(0, 1, &resource);
+			context->PSSetSamplers(0, 1, &samplerState);
 			context->RSSetState(rasterizer);
 			context->RSSetViewports(viewportCount, viewports);
 			context->OMSetBlendState(blending, blendFactor, sampleMask);
@@ -253,6 +297,7 @@ float4 ps(V i) : SV_Target
 			SafeRelease(geometry);
 			SafeRelease(pixel);
 			SafeRelease(resource);
+			SafeRelease(samplerState);
 			SafeRelease(rasterizer);
 			SafeRelease(blending);
 			SafeRelease(depth);
@@ -301,7 +346,41 @@ float4 ps(V i) : SV_Target
 			}
 			textureVersion = pendingVersion;
 		}
-		if (!view) {
+		if (coverStopped) {
+			SafeRelease(coverView);
+			SafeRelease(coverTexture);
+		} else if (std::unique_lock l{ pending, std::try_to_lock }; l && !pendingCover.empty()) {
+			const auto pixels = std::exchange(pendingCover, {});
+			if (!coverFailed && !coverSampler && !InitCover()) {
+				coverFailed = true;
+				logger::error("Cover image shader setup failed, cover not drawn into frames");
+			}
+			if (!coverFailed) {
+				D3D11_TEXTURE2D_DESC td{};
+				td.Width = pendingCoverWidth;
+				td.Height = pendingCoverHeight;
+				td.MipLevels = 1;
+				td.ArraySize = 1;
+				td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+				td.SampleDesc.Count = 1;
+				td.Usage = D3D11_USAGE_IMMUTABLE;
+				td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				const D3D11_SUBRESOURCE_DATA init{ pixels.data(), static_cast<UINT>(pendingCoverWidth * 4), 0 };
+				ID3D11Texture2D*             t = nullptr;
+				ID3D11ShaderResourceView*    v = nullptr;
+				if (SUCCEEDED(device->CreateTexture2D(&td, &init, &t)) && SUCCEEDED(device->CreateShaderResourceView(t, nullptr, &v))) {
+					SafeRelease(coverView);
+					SafeRelease(coverTexture);
+					coverTexture = t;
+					coverView = v;
+					logger::info("[{:6.1f} s] Cover image drawn into frames ({}x{})", Status::Uptime(), pendingCoverWidth, pendingCoverHeight);
+				} else {
+					SafeRelease(t);
+					logger::error("Cover image texture failed, keeping what was drawn before");
+				}
+			}
+		}
+		if (!view && !coverView) {
 			return;
 		}
 
@@ -327,31 +406,41 @@ float4 ps(V i) : SV_Target
 		rd.ViewDimension = bd.SampleDesc.Count > 1 ? D3D11_RTV_DIMENSION_TEXTURE2DMS : D3D11_RTV_DIMENSION_TEXTURE2D;
 		ID3D11RenderTargetView* rtv = nullptr;
 		const auto at = Frame::Place({ static_cast<LONG>(bd.Width), static_cast<LONG>(bd.Height) }, { width, height }, spot);
-		if (at.x >= 0 && at.y >= 0 && at.x + width <= static_cast<int>(bd.Width) && at.y + height <= static_cast<int>(bd.Height) &&
-			SUCCEEDED(device->CreateRenderTargetView(back, &rd, &rtv))) {
-			if (at.x != loggedAt.x || at.y != loggedAt.y) {
+		const bool drawBox = view && at.x >= 0 && at.y >= 0 && at.x + width <= static_cast<int>(bd.Width) && at.y + height <= static_cast<int>(bd.Height);
+		if ((drawBox || coverView) && SUCCEEDED(device->CreateRenderTargetView(back, &rd, &rtv))) {
+			if (drawBox && (at.x != loggedAt.x || at.y != loggedAt.y)) {
 				loggedAt = at;
 				logger::info("[{:6.1f} s] Status drawn into frames at {},{} ({}x{} in {}x{})", Status::Uptime(), at.x, at.y, width,
 					height, bd.Width, bd.Height);
 			}
 			SavedState game;
 			game.Save();
-			const D3D11_VIEWPORT vp{ static_cast<float>(at.x), static_cast<float>(at.y), static_cast<float>(width),
-				static_cast<float>(height), 0.0f, 1.0f };
 			context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 			context->IASetInputLayout(nullptr);
 			context->VSSetShader(vs, nullptr, 0);
 			context->HSSetShader(nullptr, nullptr, 0);
 			context->DSSetShader(nullptr, nullptr, 0);
 			context->GSSetShader(nullptr, nullptr, 0);
-			context->PSSetShader(linear ? psLinear : psSrgb, nullptr, 0);
-			context->PSSetShaderResources(0, 1, &view);
 			context->RSSetState(raster);
-			context->RSSetViewports(1, &vp);
 			context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
 			context->OMSetDepthStencilState(nullptr, 0);
 			context->OMSetRenderTargets(1, &rtv, nullptr);
-			context->Draw(4, 0);
+			if (coverView) {
+				const D3D11_VIEWPORT full{ 0.0f, 0.0f, static_cast<float>(bd.Width), static_cast<float>(bd.Height), 0.0f, 1.0f };
+				context->PSSetShader(linear ? coverLinear : coverSrgb, nullptr, 0);
+				context->PSSetShaderResources(0, 1, &coverView);
+				context->PSSetSamplers(0, 1, &coverSampler);
+				context->RSSetViewports(1, &full);
+				context->Draw(4, 0);
+			}
+			if (drawBox) {
+				const D3D11_VIEWPORT vp{ static_cast<float>(at.x), static_cast<float>(at.y), static_cast<float>(width),
+					static_cast<float>(height), 0.0f, 1.0f };
+				context->PSSetShader(linear ? psLinear : psSrgb, nullptr, 0);
+				context->PSSetShaderResources(0, 1, &view);
+				context->RSSetViewports(1, &vp);
+				context->Draw(4, 0);
+			}
 			game.Restore();
 			rtv->Release();
 		}
@@ -398,6 +487,7 @@ float4 ps(V i) : SV_Target
 				}
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
 				Draw(a_swapChain);
+				++presented;
 			} else if (!unhooked) {
 				unhooked = true;
 				ReleaseAll();
@@ -434,6 +524,8 @@ namespace Frame
 
 	double LastPresent() { return lastPresentMs / 1000.0; }
 
+	std::uint64_t Presented() { return presented; }
+
 	void Publish(std::vector<std::uint32_t> a_bgra, int a_width, int a_height, const Spot& a_spot)
 	{
 		std::scoped_lock l{ pending };
@@ -443,6 +535,16 @@ namespace Frame
 		pendingSpot = a_spot;
 		++pendingVersion;
 	}
+
+	void PublishCover(std::vector<std::uint32_t> a_bgra, int a_width, int a_height)
+	{
+		std::scoped_lock l{ pending };
+		pendingCover = std::move(a_bgra);
+		pendingCoverWidth = a_width;
+		pendingCoverHeight = a_height;
+	}
+
+	void StopCover() { coverStopped = true; }
 
 	void Stop() { stopped = true; }
 }
