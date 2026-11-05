@@ -11,8 +11,7 @@ namespace
 {
 	using Present_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 	Present_t originalPresent = nullptr;
-	void**    presentSlot = nullptr;
-	bool      unhooked = false;         // render thread only
+	bool      released = false;         // render thread only
 	bool      loggedSwapChain = false;  // render thread only
 
 	std::atomic<bool>          stopped = false;
@@ -358,23 +357,6 @@ float4 ps(V i) : SV_Target
 		back->Release();
 	}
 
-	HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags);
-
-	// The hook is only needed while the status is drawn, so the slot goes back to the original. A mod that hooked over us keeps the chain.
-	void Unhook()
-	{
-		DWORD old = 0;
-		if (!VirtualProtect(presentSlot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
-			logger::error("VirtualProtect on the swapchain vtable failed ({})", GetLastError());
-			return;
-		}
-		const auto seen = InterlockedCompareExchangePointer(presentSlot, reinterpret_cast<void*>(originalPresent),
-			reinterpret_cast<void*>(&HookedPresent));
-		VirtualProtect(presentSlot, sizeof(void*), old, &old);
-		logger::info("[{:6.1f} s] Present {}", Status::Uptime(),
-			seen == reinterpret_cast<void*>(&HookedPresent) ? "unhooked" : "hooked over by another mod, staying as a pass-through");
-	}
-
 	// An exclusive fullscreen or D3D12 output can hide the child window, this tells which one a report is about.
 	// Runs on the game's own thread, since a report's log stopped at these calls when the overlay thread made them.
 	void LogSwapChain(IDXGISwapChain* a_swapChain)
@@ -398,10 +380,11 @@ float4 ps(V i) : SV_Target
 				}
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
 				Draw(a_swapChain);
-			} else if (!unhooked) {
-				unhooked = true;
+			} else if (!released) {
+				// The slot is never put back: a mod may have detoured this function's code, Community Shaders does, and restoring the slot would cut it out.
+				released = true;
 				ReleaseAll();
-				Unhook();
+				logger::info("[{:6.1f} s] Present hook stays as a pass-through", Status::Uptime());
 			}
 		}
 		return originalPresent(a_swapChain, a_sync, a_flags);
@@ -425,7 +408,6 @@ namespace Frame
 			return true;  // do not retry
 		}
 		originalPresent = reinterpret_cast<Present_t>(*slot);
-		presentSlot = slot;
 		InterlockedExchangePointer(slot, reinterpret_cast<void*>(&HookedPresent));
 		VirtualProtect(slot, sizeof(void*), old, &old);
 		logger::info("[{:6.1f} s] Present hooked on the game swapchain", Status::Uptime());
