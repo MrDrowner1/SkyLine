@@ -10,12 +10,18 @@
 namespace
 {
 	using Present_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
-	Present_t originalPresent = nullptr;
+	Present_t originalPresent = nullptr;  // the shared slot's value when hooked
+	void**    sharedVtable = nullptr;     // the table the swapchain had, left unchanged
 	bool      released = false;         // render thread only
 	bool      loggedSwapChain = false;  // render thread only
 
 	std::atomic<bool>          stopped = false;
 	std::atomic<std::int64_t>  lastPresentMs = 0;
+
+	// The game's swapchain gets its own copy of its vtable with Present replaced. Writing the shared table instead lets an
+	// overlay that hooks Present again later (Steam's does) detour our function and call itself in a loop.
+	constexpr std::size_t VtableMax = 256;
+	void*                 ownVtable[1 + VtableMax]{};  // [0] is the RTTI locator before the table
 
 	// Published by the overlay thread.
 	std::mutex                 pending;
@@ -381,13 +387,18 @@ float4 ps(V i) : SV_Target
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
 				Draw(a_swapChain);
 			} else if (!released) {
-				// The slot is never put back: a mod may have detoured this function's code, Community Shaders does, and restoring the slot would cut it out.
+				// The swapchain keeps our vtable: a mod may have detoured this function's code, Community Shaders does, and putting the old one back would cut it out.
 				released = true;
 				ReleaseAll();
 				logger::info("[{:6.1f} s] Present hook stays as a pass-through", Status::Uptime());
 			}
 		}
-		return originalPresent(a_swapChain, a_sync, a_flags);
+		// Follows the shared slot, so a mod that hooks it after us still runs for the game's swapchain.
+		auto next = reinterpret_cast<Present_t>(sharedVtable[8]);
+		if (next == &HookedPresent) {
+			next = originalPresent;
+		}
+		return next(a_swapChain, a_sync, a_flags);
 	}
 }
 
@@ -401,16 +412,32 @@ namespace Frame
 			return false;
 		}
 		auto** vtable = *reinterpret_cast<void***>(swapChain);
-		auto*  slot = &vtable[8];  // IDXGISwapChain::Present
-		DWORD  old = 0;
-		if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
-			logger::error("VirtualProtect on the swapchain vtable failed ({})", GetLastError());
+		// Copy up to the first entry that isn't code or VtableMax, whichever comes first. The table's length isn't known and
+		// tables can follow each other with nothing between them: copying past the end is harmless, stopping short isn't.
+		const auto readable = [](const void* a_p) {
+			MEMORY_BASIC_INFORMATION m{};
+			return VirtualQuery(a_p, &m, sizeof(m)) && m.State == MEM_COMMIT && !(m.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+		};
+		const auto code = [](const void* a_p) {
+			MEMORY_BASIC_INFORMATION m{};
+			return VirtualQuery(a_p, &m, sizeof(m)) && m.State == MEM_COMMIT &&
+			       (m.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+		};
+		std::size_t count = 0;
+		while (count < VtableMax && readable(&vtable[count]) && code(vtable[count])) {
+			++count;
+		}
+		if (count < 18) {  // IDXGISwapChain's methods
+			logger::error("Swapchain vtable not recognised ({} entries), status not drawn into frames", count);
 			return true;  // do not retry
 		}
-		originalPresent = reinterpret_cast<Present_t>(*slot);
-		InterlockedExchangePointer(slot, reinterpret_cast<void*>(&HookedPresent));
-		VirtualProtect(slot, sizeof(void*), old, &old);
-		logger::info("[{:6.1f} s] Present hooked on the game swapchain", Status::Uptime());
+		ownVtable[0] = readable(&vtable[-1]) ? vtable[-1] : nullptr;
+		std::copy_n(vtable, count, &ownVtable[1]);
+		sharedVtable = vtable;
+		originalPresent = reinterpret_cast<Present_t>(vtable[8]);  // IDXGISwapChain::Present
+		ownVtable[1 + 8] = reinterpret_cast<void*>(&HookedPresent);
+		InterlockedExchangePointer(reinterpret_cast<void**>(swapChain), &ownVtable[1]);
+		logger::info("[{:6.1f} s] Present hooked on the game swapchain ({} vtable entries)", Status::Uptime(), count);
 		return true;
 	}
 
