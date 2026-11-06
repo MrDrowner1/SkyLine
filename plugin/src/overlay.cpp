@@ -1093,14 +1093,37 @@ namespace
 		Frame::Publish(std::move(out), size.cx, size.cy, Where());
 	}
 
-	HWND FindGameWindow()
+	// What made a window that can't be the game window, e.g. another plugin's splash, "" when it can be.
+	std::string ForeignWindow(HWND a_hwnd)
+	{
+		const auto instance = reinterpret_cast<HMODULE>(GetClassLongPtrW(a_hwnd, GCLP_HMODULE));
+		wchar_t    wpath[1024];
+		if (instance && GetModuleFileNameW(instance, wpath, static_cast<DWORD>(std::size(wpath)))) {
+			const auto path = SKSE::stl::utf16_to_utf8(wpath).value_or(""s);
+			if (Lower(path).find("\\skse\\plugins\\") != std::string::npos) {
+				return std::string(BaseName(path));
+			}
+		}
+		// The game window is an unowned window, neither layered nor a tool window.
+		const auto exStyle = GetWindowLongPtrW(a_hwnd, GWL_EXSTYLE);
+		if (GetWindow(a_hwnd, GW_OWNER) || (exStyle & (WS_EX_LAYERED | WS_EX_TOOLWINDOW))) {
+			char name[256]{};
+			GetClassNameA(a_hwnd, name, static_cast<int>(std::size(name)));
+			return "window class "s + name;
+		}
+		return {};
+	}
+
+	// a_foreign gets what made the first window of this process left out as not the game's.
+	HWND FindGameWindow(std::string* a_foreign = nullptr)
 	{
 		struct Search
 		{
-			DWORD pid;
-			HWND  best;
-			long  area;
-		} s{ GetCurrentProcessId(), nullptr, 0 };
+			DWORD        pid;
+			HWND         best;
+			long         area;
+			std::string* foreign;
+		} s{ GetCurrentProcessId(), nullptr, 0, a_foreign };
 		EnumWindows(
 			[](HWND a_hwnd, LPARAM a_lp) -> BOOL {
 				auto& s = *reinterpret_cast<Search*>(a_lp);
@@ -1112,7 +1135,16 @@ namespace
 				RECT r{};
 				GetClientRect(a_hwnd, &r);
 				const long area = (r.right - r.left) * (r.bottom - r.top);
-				if (r.right - r.left >= 320 && r.bottom - r.top >= 240 && area > s.area) {
+				if (r.right - r.left < 320 || r.bottom - r.top < 240) {
+					return TRUE;
+				}
+				if (auto by = ForeignWindow(a_hwnd); !by.empty()) {
+					if (s.foreign && s.foreign->empty()) {
+						*s.foreign = std::move(by);
+					}
+					return TRUE;
+				}
+				if (area > s.area) {
 					s.best = a_hwnd;
 					s.area = area;
 				}
@@ -1187,7 +1219,21 @@ namespace
 		}
 
 		if (!game) {
-			if (const auto g = FindGameWindow()) {
+			static bool foreignLogged = false;
+			std::string foreign;
+			const auto  g = FindGameWindow(splash || !foreignLogged ? &foreign : nullptr);
+			if (!foreign.empty()) {
+				if (!foreignLogged) {
+					foreignLogged = true;
+					logger::info("[{:6.1f} s] Not the game window: {}", Status::Uptime(), foreign);
+				}
+				// Another plugin's splash came up after ours, so ours gives way as it would have at the start.
+				if (splash && !g) {
+					DestroySplash();
+					logger::info("[{:6.1f} s] Another splash is up ({}), splash closed", Status::Uptime(), foreign);
+				}
+			}
+			if (g) {
 				game = g;
 				GetWindowRect(game, &gameRect);
 				logger::info("[{:6.1f} s] Game window found ({}x{})", Status::Uptime(), gameRect.right - gameRect.left,
@@ -1305,7 +1351,13 @@ namespace
 		// Wine's Wayland driver makes the game window a popup of the active window, and destroying that parent ends the Wayland connection and the game.
 		// So there the splash has to be gone before the game creates its window.
 		const bool waylandDriver = GetModuleHandleW(L"winewayland.drv") != nullptr;
-		bool       showSplash = settings.splash && !FindGameWindow();
+		std::string otherSplash;
+		bool        showSplash = settings.splash && !FindGameWindow(&otherSplash);
+		// Another plugin's splash is already up, two splashes would cover each other.
+		if (showSplash && !otherSplash.empty()) {
+			logger::info("[{:6.1f} s] Another splash is up ({}), no splash", Status::Uptime(), otherSplash);
+			showSplash = false;
+		}
 		if (showSplash && waylandDriver && !Status::HookGameWindow()) {
 			logger::warn("Wine's Wayland driver is in use and the game window can't be hooked, no splash");
 			showSplash = false;
