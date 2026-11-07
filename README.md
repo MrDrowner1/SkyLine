@@ -7,7 +7,7 @@ Adds a splash screen with the progress bar before the Skyrim window appears.
 Adds a progress bar and shows what is loading while the game starts.
 
 ## Settings
-Settings in `SKSE/Plugins/SkyLine.ini`:
+Settings are in `SKSE/Plugins/SkyLine.ini`. Keys set in `SKSE/Plugins/SkyLine_Custom.ini` will override it.
 
 | Setting | Description |
 |---|---|

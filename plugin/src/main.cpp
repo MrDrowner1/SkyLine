@@ -521,6 +521,27 @@ namespace
 		return ini.empty() ? ini : ini.replace_extension(L".ini");
 	}
 
+	// SkyLine_Custom.ini next to SkyLine.ini, each key set there overrides the main ini.
+	std::filesystem::path CustomIniPath()
+	{
+		auto ini = DllPath();
+		return ini.empty() ? ini : ini.replace_filename(ini.stem().wstring() + L"_Custom.ini");
+	}
+
+	int IniInt(const wchar_t* a_key, int a_default)
+	{
+		const auto v = static_cast<int>(GetPrivateProfileIntW(L"Overlay", a_key, a_default, IniPath().c_str()));
+		return static_cast<int>(GetPrivateProfileIntW(L"Overlay", a_key, v, CustomIniPath().c_str()));
+	}
+
+	// A key present but empty in the custom ini still overrides
+	void IniString(const wchar_t* a_key, const wchar_t* a_default, wchar_t* a_out, DWORD a_size)
+	{
+		std::wstring v(a_size, L'\0');
+		GetPrivateProfileStringW(L"Overlay", a_key, a_default, v.data(), a_size, IniPath().c_str());
+		GetPrivateProfileStringW(L"Overlay", a_key, v.data(), a_out, a_size, CustomIniPath().c_str());
+	}
+
 	Overlay::Settings LoadSettings()
 	{
 		Overlay::Settings s;
@@ -528,14 +549,26 @@ namespace
 		if (ini.empty()) {
 			return s;
 		}
-		const auto get = [&](const wchar_t* a_key, int a_default) {
-			return static_cast<int>(GetPrivateProfileIntW(L"Overlay", a_key, a_default, ini.c_str()));
-		};
+		if (std::error_code ec; std::filesystem::exists(CustomIniPath(), ec)) {
+			// Section names come as a list of strings ending in an empty one
+			wchar_t names[4096]{};
+			GetPrivateProfileSectionNamesW(names, static_cast<DWORD>(std::size(names)), CustomIniPath().c_str());
+			bool overlay = false;
+			for (const wchar_t* n = names; *n && !overlay; n += wcslen(n) + 1) {
+				overlay = _wcsicmp(n, L"Overlay") == 0;
+			}
+			if (overlay) {
+				logger::info("Using {} over {}", CustomIniPath().filename().string(), ini.filename().string());
+			} else {
+				logger::warn("{} has no [Overlay] section, its settings are ignored", CustomIniPath().filename().string());
+			}
+		}
+		const auto get = [](const wchar_t* a_key, int a_default) { return IniInt(a_key, a_default); };
 		s.enabled = get(L"bEnabled", 1) != 0;
 		s.fontSize = std::clamp(get(L"iFontSize", s.fontSize), 8, 48);
 		s.lingerSeconds = std::clamp(get(L"iLingerSeconds", s.lingerSeconds), 0, 60);
 		wchar_t face[LF_FACESIZE + 1];
-		GetPrivateProfileStringW(L"Overlay", L"sFont", L"", face, static_cast<DWORD>(std::size(face)), ini.c_str());
+		IniString(L"sFont", L"", face, static_cast<DWORD>(std::size(face)));
 		if (std::wstring_view f = face; !f.empty()) {
 			if (f.size() < LF_FACESIZE) {
 				s.font = f;
@@ -545,13 +578,13 @@ namespace
 		}
 		// Relative to the DLL's folder, an absolute path replaces it.
 		wchar_t image[1024];
-		GetPrivateProfileStringW(L"Overlay", L"sSplashImage", L"SkyLineSplash.jpg", image, static_cast<DWORD>(std::size(image)), ini.c_str());
+		IniString(L"sSplashImage", L"SkyLineSplash.jpg", image, static_cast<DWORD>(std::size(image)));
 		if (*image) {
 			s.splashImage = ini.parent_path() / image;
 		}
 		const auto text = [&](const wchar_t* a_key) {
 			wchar_t v[64];
-			GetPrivateProfileStringW(L"Overlay", a_key, L"", v, static_cast<DWORD>(std::size(v)), ini.c_str());
+			IniString(a_key, L"", v, static_cast<DWORD>(std::size(v)));
 			std::string r;
 			for (const wchar_t* c = v; *c; ++c) {
 				if (*c < 128 && !std::isspace(*c) && *c != '-' && *c != '_' && *c != '#') {
@@ -614,7 +647,7 @@ namespace
 	void InitializeLog()
 	{
 		auto path = logger::log_directory();
-		if (const auto ini = IniPath(); !path || (!ini.empty() && !GetPrivateProfileIntW(L"Overlay", L"bLog", 1, ini.c_str()))) {
+		if (const auto ini = IniPath(); !path || (!ini.empty() && !IniInt(L"bLog", 1))) {
 			auto off = std::make_shared<spdlog::logger>("global log"s);
 			off->set_level(spdlog::level::off);
 			spdlog::set_default_logger(std::move(off));
@@ -724,7 +757,7 @@ extern "C" DLLEXPORT bool SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 	logger::info("[{:6.1f} s] {} {} (game {})", Status::Uptime(), Version::PROJECT, Version::NAME, game.string());
 	const auto settings = LoadSettings();
 	if (!settings.enabled) {
-		logger::info("bEnabled=0 in SkyLine.ini; nothing to do");
+		logger::info("bEnabled=0 in the ini, nothing to do");
 		return true;
 	}
 
