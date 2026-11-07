@@ -1324,10 +1324,28 @@ namespace
 
 		const auto font = [](int a_px, int a_weight) {
 			return CreateFontW(-Px(a_px), 0, 0, 0, a_weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-				CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+				CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, settings.font.c_str());
 		};
 		headFont = font(settings.fontSize, FW_SEMIBOLD);
 		detailFont = font(settings.fontSize * 13 / 16, FW_NORMAL);
+		if (const auto screen = GetDC(nullptr)) {
+			const auto previous = SelectObject(screen, headFont);
+			wchar_t    used[LF_FACESIZE]{};
+			GetTextFaceW(screen, static_cast<int>(std::size(used)), used);
+			SelectObject(screen, previous);
+			ReleaseDC(nullptr, screen);
+			const auto name = SKSE::stl::utf16_to_utf8(used).value_or("?"s);
+			if (_wcsicmp(used, settings.font.c_str()) == 0) {
+				logger::info("Font: {}", name);
+			} else {
+				const auto asked = SKSE::stl::utf16_to_utf8(settings.font).value_or("?"s);
+				if (settings.font == Overlay::Settings{}.font) {
+					logger::info("Font {} isn't installed, the system used {} instead", asked, name);
+				} else {
+					logger::warn("Font {} isn't installed, the system used {} instead", asked, name);
+				}
+			}
+		}
 		// The dragon icon in SkyrimSE.exe's own resources (group 101, 256 px), so the mod ships no artwork.
 		logo = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), IMAGE_ICON, Px(150), Px(150), LR_DEFAULTCOLOR));
 

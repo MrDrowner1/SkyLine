@@ -5,6 +5,7 @@ namespace Overlay
 	struct Settings
 	{
 		int  fontSize = 16;  // px at 96 dpi
+		std::wstring font = L"Segoe UI";
 		int  lingerSeconds = 0;
 		bool enabled = true;
 		std::filesystem::path splashImage;  // empty shows the game's dragon icon

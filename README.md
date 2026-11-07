@@ -18,6 +18,7 @@ Settings in `SKSE/Plugins/SkyLine.ini`:
 | `bBarOnly` | 1 shows only the progress bar |
 | `bShowDetail` | 0 hides the line with detailed info |
 | `iFontSize`, `sTextColor` | text size and color |
+| `sFont` | name of an installed font |
 | `bTextShadow` | 0 removes the shadow behind the text |
 | `bDpiScaling` | 0 ignores Windows display scaling |
 | `iBarHeight`, `iBarLength`, `sBarColor` | bar size and color |

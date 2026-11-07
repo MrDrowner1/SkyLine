@@ -522,6 +522,15 @@ namespace
 		s.enabled = get(L"bEnabled", 1) != 0;
 		s.fontSize = std::clamp(get(L"iFontSize", s.fontSize), 8, 48);
 		s.lingerSeconds = std::clamp(get(L"iLingerSeconds", s.lingerSeconds), 0, 60);
+		wchar_t face[LF_FACESIZE + 1];
+		GetPrivateProfileStringW(L"Overlay", L"sFont", L"", face, static_cast<DWORD>(std::size(face)), ini.c_str());
+		if (std::wstring_view f = face; !f.empty()) {
+			if (f.size() < LF_FACESIZE) {
+				s.font = f;
+			} else {
+				logger::warn("sFont is longer than {} characters, using the default", LF_FACESIZE - 1);
+			}
+		}
 		// Relative to the DLL's folder, an absolute path replaces it.
 		wchar_t image[1024];
 		GetPrivateProfileStringW(L"Overlay", L"sSplashImage", L"SkyLineSplash.jpg", image, static_cast<DWORD>(std::size(image)), ini.c_str());
@@ -583,8 +592,8 @@ namespace
 			}
 		}
 		const auto hex = [](COLORREF a_c) { return std::format("{:02X}{:02X}{:02X}", GetRValue(a_c), GetGValue(a_c), GetBValue(a_c)); };
-		logger::info("Settings: font {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} color {}, text color {}, text shadow {}, dpi scaling {}, "
-			"position {},{} offset {},{}", s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
+		logger::info("Settings: font {} {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} color {}, text color {}, text shadow {}, dpi scaling {}, "
+			"position {},{} offset {},{}", SKSE::stl::utf16_to_utf8(s.font).value_or("?"), s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
 			hex(s.barColor), hex(s.textColor), s.textShadow, s.dpiScaling, s.anchor.x, s.anchor.y, s.offset.x, s.offset.y);
 		return s;
 	}
