@@ -141,7 +141,7 @@ namespace Sampler
 {
 	void SetSelf(HMODULE a_self) { self = a_self; }
 
-	std::string Owner(std::string* a_chain)
+	std::string Owner(std::string* a_chain, bool* a_skse)
 	{
 		static std::mutex                          lock;
 		static std::unordered_map<HMODULE, Module> cache;
@@ -178,6 +178,9 @@ namespace Sampler
 					*a_chain += std::format(" x{}", count);
 				}
 			}
+		}
+		if (a_skse) {
+			*a_skse = std::ranges::any_of(runs, [](const auto& r) { return r.first->kind == Module::Kind::kSKSE; });
 		}
 		// Hooks (also chained ones) show as 1-2 frames per plugin, a plugin's own work as 3 or more.
 		for (const auto& [m, count] : runs) {
@@ -250,10 +253,13 @@ namespace Sampler
 		}
 	}
 
-	std::string Thread::Sample()
+	std::string Thread::Sample(bool* a_skse)
 	{
 		std::uintptr_t rip = 0;
 		std::size_t    words = 0;
+		if (a_skse) {
+			*a_skse = false;
+		}
 		if (!_handle || !_stackBase || !Capture(_handle, _stackBase, &rip, &words)) {
 			return {};
 		}
@@ -262,8 +268,16 @@ namespace Sampler
 		if (const auto* m = Find(rip); m && m->kind != Module::Kind::kSystem) {
 			first = m;
 		}
-		for (std::size_t i = 0; !first && i < words; ++i) {
+		std::size_t i = 0;
+		for (; !first && i < words; ++i) {
 			first = ReturnTarget(stackCopy[i]);
+		}
+		if (a_skse) {
+			*a_skse = first && first->kind == Module::Kind::kSKSE;
+			for (; !*a_skse && i < words; ++i) {
+				const auto* m = ReturnTarget(stackCopy[i]);
+				*a_skse = m && m->kind == Module::Kind::kSKSE;
+			}
 		}
 		return first ? Label(*first) : "system code"s;
 	}

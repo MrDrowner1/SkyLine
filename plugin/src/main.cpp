@@ -103,8 +103,13 @@ namespace
 			// From the plugin load pass to the main menu, each open counts towards an activity and each file is logged once.
 			const bool  track = Status::dataThread && !Status::mainMenu && lower.find('.') != std::string::npos;
 			std::string chain;
-			const auto  owner = track ? Sampler::Owner(&chain) : ""s;
+			bool        skse = false;
+			const auto  owner = track ? Sampler::Owner(&chain, &skse) : ""s;
 			const auto  noun = Noun(lower);
+			const auto  tid = GetCurrentThreadId();
+			if (skse && tid == Status::dataThread) {
+				Status::DataLoadedSent(now, owner.empty() ? "a file open" : "a file open by " + owner);
+			}
 			bool        log = false;
 			{
 				std::scoped_lock l{ Status::shared.lock };
@@ -128,7 +133,6 @@ namespace
 				Status::shared.fileAt = now;
 			}
 			if (log) {
-				const auto tid = GetCurrentThreadId();
 				const bool plugins = chain.find(".dll") != std::string::npos;
 				logger::info("[{:6.1f} s] file ({} thread, {}): {}{}", now,
 					tid == Status::mainThread ? "main" : tid == Status::dataThread ? "data" : "other",
@@ -140,9 +144,6 @@ namespace
 		// Each plugin is opened twice: a header pass on the main thread, then the real load on a separate data thread.
 		const auto tid = GetCurrentThreadId();
 		const bool load = tid != Status::mainThread;
-		if (load && Status::dataThread.exchange(tid) != tid) {
-			logger::info("[{:6.1f} s] Plugins are loaded on thread {} (main thread {})", now, tid, Status::mainThread.load());
-		}
 		std::uint32_t index = 0, total = 0;
 		bool          first, setup = false;
 		{
@@ -165,6 +166,10 @@ namespace
 				Status::shared.pluginIndex = index;
 				Status::shared.pluginAt = now;
 			}
+		}
+		// Only a plugin new to the load pass picks the data thread. Worker threads also reopen loaded plugins during game data setup.
+		if (load && first && Status::dataThread.exchange(tid) != tid) {
+			logger::info("[{:6.1f} s] Plugins are loaded on thread {} (main thread {})", now, tid, Status::mainThread.load());
 		}
 		static std::atomic<bool> reopenLogged{ false };
 		if (first) {
@@ -397,11 +402,18 @@ namespace
 		case SKSE::MessagingInterface::kDataLoaded:
 			{
 				const auto tid = GetCurrentThreadId();
-				if (!Status::dataThread) {
-					Status::dataThread = tid;
+				if (const auto was = Status::dataThread.exchange(tid); was && was != tid) {
+					logger::info("[{:6.1f} s] Data thread changed from {} to {}, the one kDataLoaded came on", t, was, tid);
 				}
-				logger::info("[{:6.1f} s] SKSE: kDataLoaded on thread {} ({} plugins in the load order)", t, tid,
-					LoadOrderCount());
+				const auto sent = Status::dataLoadedSentAt.load();
+				if (sent > 0 && t - sent >= 0.1) {
+					logger::info("[{:6.1f} s] SKSE: kDataLoaded on thread {} ({} plugins in the load order), sent at {:.1f} s, "
+								 "other plugins' handlers ran {:.1f} s before SkyLine's",
+						t, tid, LoadOrderCount(), sent, t - sent);
+				} else {
+					logger::info("[{:6.1f} s] SKSE: kDataLoaded on thread {} ({} plugins in the load order)", t, tid,
+						LoadOrderCount());
+				}
 				AddMenuSink();
 				Status::dataLoadedAt = t;
 				Status::dataLoaded = true;
@@ -628,6 +640,16 @@ namespace Status
 		_CreateWindowExW = reinterpret_cast<decltype(&CreateWindowExW)>(
 			PatchImport(game, "USER32.dll", "CreateWindowExW", reinterpret_cast<void*>(&HookCreateWindowExW)));
 		return _CreateWindowExA || _CreateWindowExW;
+	}
+
+	void DataLoadedSent(double a_at, std::string_view a_where)
+	{
+		if (dataLoaded || !dataThread) {
+			return;
+		}
+		if (double none = 0; dataLoadedSentAt.compare_exchange_strong(none, a_at)) {
+			logger::info("[{:6.1f} s] SKSE started sending kDataLoaded (SKSE on the data thread's stack in {})", a_at, a_where);
+		}
 	}
 
 	double ScanEstimate()

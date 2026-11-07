@@ -85,6 +85,10 @@ namespace Status
 	inline std::atomic<bool>   postLoad{ false };
 	inline std::atomic<bool>   dataLoaded{ false };
 	inline std::atomic<double> dataLoadedAt{ 0 };
+	// The first SKSE frame on the data thread marks the start.
+	inline std::atomic<double> dataLoadedSentAt{ 0 };
+	// Records a_at as the start of the kDataLoaded handlers once, a_where says how it was seen.
+	void DataLoadedSent(double a_at, std::string_view a_where);
 	inline std::atomic<bool>   mainMenu{ false };
 	inline std::atomic<bool>   done{ false };
 

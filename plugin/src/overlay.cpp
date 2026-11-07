@@ -145,6 +145,54 @@ namespace
 	Busy mainBusy;
 	Busy dataBusy;
 
+	// Sampled time per module on one thread, logged at the end.
+	struct ThreadTime
+	{
+		std::vector<std::pair<std::string, double>> modules;
+		double                                      from = -1;
+		double                                      to = 0;
+
+		void Add(const std::string& a_label, double a_now, double a_seconds)
+		{
+			if (from < 0) {
+				from = a_now;
+			}
+			to = a_now;
+			const auto& name = a_label.empty() ? "not sampled"s : a_label;
+			auto        it = std::ranges::find(modules, name, &std::pair<std::string, double>::first);
+			if (it == modules.end()) {
+				modules.emplace_back(name, a_seconds);
+			} else {
+				it->second += a_seconds;
+			}
+		}
+
+		void Log(std::string_view a_what)
+		{
+			if (from < 0) {
+				return;
+			}
+			std::ranges::sort(modules, std::greater{}, &std::pair<std::string, double>::second);
+			std::string list;
+			double      rest = 0;
+			for (std::size_t i = 0; i < modules.size(); ++i) {
+				if (i < 8 && modules[i].second >= 0.1) {
+					list += std::format("{}{} {:.1f} s", list.empty() ? "" : ", ", modules[i].first, modules[i].second);
+				} else {
+					rest += modules[i].second;
+				}
+			}
+			if (rest >= 0.1) {
+				list += std::format(", others {:.1f} s", rest);
+			}
+			logger::info("  {} ({:.1f}-{:.1f} s): {}", a_what, from, to, list);
+		}
+	};
+	ThreadTime mainTime;
+	ThreadTime dataTime;
+	ThreadTime handlerTime;
+	double     sampledAt = 0;
+
 	// The activity with the most file opens in the last second. The shown one stays until another has twice its rate.
 	std::string shownOwner, shownNoun;
 	const Status::Activity* PickActivity(const std::vector<Status::Activity>& a_list, double a_now)
@@ -1169,11 +1217,28 @@ namespace
 			if (const auto id = Status::dataThread.load(); id && id != Status::mainThread && id != dataSampler.Id()) {
 				dataSampler.Open(id);
 			}
-			mainBusy.Add(mainSampler.Sample());
+			// Each sample stands for the time since the last one, at most 0.5 s when the overlay thread was held up.
+			const double now = Status::Uptime();
+			const double step = sampledAt > 0 ? std::min(now - sampledAt, 0.5) : 0.1;
+			sampledAt = now;
+			const auto mainLabel = mainSampler.Sample();
+			mainBusy.Add(mainLabel);
 			mainBusy.Log("main");
+			mainTime.Add(mainLabel, now, step);
 			if (dataSampler.Id()) {
-				dataBusy.Add(dataSampler.Sample());
+				bool       skse = false;
+				const auto data = dataSampler.Sample(&skse);
+				dataBusy.Add(data);
 				dataBusy.Log("data");
+				if (!Status::dataLoaded) {
+					dataTime.Add(data, now, step);
+					if (skse) {
+						Status::DataLoadedSent(now, data.empty() ? "a sample"s : "a sample in " + data);
+					}
+					if (Status::dataLoadedSentAt > 0) {
+						handlerTime.Add(data, now, step);
+					}
+				}
 			}
 
 			// Done once the main menu is up and data is loaded, or 3 minutes after kDataLoaded if no main menu shows up.
@@ -1198,6 +1263,10 @@ namespace
 					logger::info("  {} loading {}: {} files, {:.1f}-{:.1f} s", a.owner.empty() ? "game"s : a.owner, a.noun,
 						a.count, a.firstAt, a.lastAt);
 				}
+				logger::info("Sampled time by the plugin or game code running, system DLLs skipped:");
+				mainTime.Log("main thread");
+				dataTime.Log("data thread until kDataLoaded");
+				handlerTime.Log("data thread in kDataLoaded handlers before SkyLine's");
 				if (ready) {
 					splashEstimate.Close(windowAt);
 					gameEstimate.Close(readyAt);
