@@ -598,7 +598,7 @@ namespace
 	{
 		UINT                       w = 0, h = 0;
 		std::vector<std::uint32_t> src;
-		std::string                name = a_path.filename().string();
+		std::string                name = SKSE::stl::utf16_to_utf8(a_path.filename().wstring()).value_or("?");
 		if (!a_path.empty()) {
 			if (const auto hr = DecodeFile(a_path, src, w, h); FAILED(hr)) {
 				logger::warn("Splash image {} not loaded ({:08X})", name, static_cast<std::uint32_t>(hr));

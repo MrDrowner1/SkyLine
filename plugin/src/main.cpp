@@ -542,6 +542,27 @@ namespace
 		GetPrivateProfileStringW(L"Overlay", a_key, v.data(), a_out, a_size, CustomIniPath().c_str());
 	}
 
+	// A random picture directly inside a_folder, empty when there is none.
+	std::filesystem::path RandomImage(const std::filesystem::path& a_folder)
+	{
+		std::vector<std::filesystem::path> images;
+		std::error_code                    ec;
+		for (std::filesystem::directory_iterator it(a_folder, ec), end; !ec && it != end; it.increment(ec)) {
+			const auto ext = it->path().extension().wstring();
+			std::error_code typeEc;
+			if (it->is_regular_file(typeEc) && std::ranges::any_of(std::initializer_list{ L".jpg", L".jpeg", L".png", L".bmp" },
+													[&](const wchar_t* a_ext) { return _wcsicmp(ext.c_str(), a_ext) == 0; })) {
+				images.push_back(it->path());
+			}
+		}
+		if (images.empty()) {
+			return {};
+		}
+		LARGE_INTEGER now{};
+		QueryPerformanceCounter(&now);
+		return images[static_cast<std::size_t>(now.QuadPart) % images.size()];
+	}
+
 	Overlay::Settings LoadSettings()
 	{
 		Overlay::Settings s;
@@ -581,6 +602,14 @@ namespace
 		IniString(L"sSplashImage", L"SkyLineSplash.jpg", image, static_cast<DWORD>(std::size(image)));
 		if (*image) {
 			s.splashImage = ini.parent_path() / image;
+			if (std::error_code ec; std::filesystem::is_directory(s.splashImage, ec)) {
+				s.splashImage = RandomImage(s.splashImage);
+				if (s.splashImage.empty()) {
+					logger::warn("sSplashImage folder has no jpg, png or bmp");
+				} else {
+					logger::info("Splash image picked from folder: {}", SKSE::stl::utf16_to_utf8(s.splashImage.filename().wstring()).value_or("?"));
+				}
+			}
 		}
 		const auto text = [&](const wchar_t* a_key) {
 			wchar_t v[64];
