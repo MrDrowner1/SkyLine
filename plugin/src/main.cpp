@@ -1,5 +1,6 @@
 #include "Version.h"
 #include "overlay.h"
+#include "vr.h"
 #include "sampler.h"
 #include "state.h"
 
@@ -340,9 +341,39 @@ namespace
 		return _CreateWindowExW(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
 	}
 
+#ifdef ENABLE_SKYRIM_VR
+	std::uint32_t (*_VrInit)(int*, int);
+	std::uint32_t (*_VrInit2)(int*, int, const char*);
+
+	// The headset overlay can only start after this, asking OpenVR during its init could race with it.
+	std::uint32_t HookVrInit(int* a_error, int a_type)
+	{
+		const auto token = _VrInit(a_error, a_type);
+		if (!a_error || *a_error == 0) {
+			Vr::MarkInitialized();
+		}
+		return token;
+	}
+
+	std::uint32_t HookVrInit2(int* a_error, int a_type, const char* a_info)
+	{
+		const auto token = _VrInit2(a_error, a_type, a_info);
+		if (!a_error || *a_error == 0) {
+			Vr::MarkInitialized();
+		}
+		return token;
+	}
+#endif
+
 	void InstallHooks(const SKSE::LoadInterface* a_skse)
 	{
 		const auto game = GetModuleHandleW(nullptr);
+#ifdef ENABLE_SKYRIM_VR
+		_VrInit = reinterpret_cast<decltype(_VrInit)>(PatchImport(game, "openvr_api.dll", "VR_InitInternal", reinterpret_cast<void*>(&HookVrInit)));
+		_VrInit2 = reinterpret_cast<decltype(_VrInit2)>(PatchImport(game, "openvr_api.dll", "VR_InitInternal2", reinterpret_cast<void*>(&HookVrInit2)));
+		Vr::SetInitHooked(_VrInit || _VrInit2);
+		logger::info("OpenVR init import hooked: {}", _VrInit2 ? "VR_InitInternal2"sv : _VrInit ? "VR_InitInternal"sv : "none, waiting for the first frame"sv);
+#endif
 		Patch(game, "The game exe", "CreateFileA", &HookCreateFileA, _CreateFileA);
 		Patch(game, "The game exe", "CreateFileW", &HookCreateFileW, _CreateFileW);
 		Patch(game, "The game exe", "FindFirstFileA", &HookFindFirstFileA, _FindFirstFileA);
@@ -672,9 +703,15 @@ namespace
 		return s;
 	}
 
-	// bLog=0 leaves the log file alone and drops every message.
+	// bLog=0 leaves the log file alone and drops every message. Query and Load both call this, only the first one opens the log.
 	void InitializeLog()
 	{
+		static bool done = false;
+		if (std::exchange(done, true)) {
+			return;
+		}
+		GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCWSTR>(&InitializeLog), &self);
 		auto path = logger::log_directory();
 		if (const auto ini = IniPath(); !path || (!ini.empty() && !IniInt(L"bLog", 1))) {
 			auto off = std::make_shared<spdlog::logger>("global log"s);
@@ -769,7 +806,13 @@ extern "C" DLLEXPORT bool SKSEPlugin_Query([[maybe_unused]] const SKSE::QueryInt
 	a_info->name = Version::PROJECT.data();
 	a_info->version = REL::Version(Version::MAJOR, Version::MINOR, Version::PATCH).pack();
 #ifdef ENABLE_SKYRIM_VR
-	return a_skse->RuntimeVersion() == SKSE::RUNTIME_VR_1_4_15;
+	// Any 1.4 runtime is VR, SE is 1.5 and AE 1.6 or later.
+	InitializeLog();
+	const auto runtime = a_skse->RuntimeVersion();
+	const bool accepted = runtime.major() == 1 && runtime.minor() == 4;
+	logger::info("Query: {} {}, SKSE {:08X}, runtime {}, {}", Version::PROJECT, Version::NAME, a_skse->SKSEVersion(), runtime.string(),
+		accepted ? "accepted"sv : "refused"sv);
+	return accepted;
 #else
 	return true;
 #endif
@@ -777,24 +820,39 @@ extern "C" DLLEXPORT bool SKSEPlugin_Query([[maybe_unused]] const SKSE::QueryInt
 
 extern "C" DLLEXPORT bool SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 {
-	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		reinterpret_cast<LPCWSTR>(&InitializeLog), &self);
 	InitializeLog();
-	SKSE::Init(a_skse, { .log = false });
+	// The step goes to the log first, SKSE catches a fault in here and only says the plugin failed.
+	const auto step = [](std::string_view a_name) { logger::info("Load: {}", a_name); };
+	try {
+		step("SKSE init"sv);
+		SKSE::Init(a_skse, { .log = false });
 
-	const auto game = REL::Module::get().version();
-	logger::info("[{:6.1f} s] {} {} (game {})", Status::Uptime(), Version::PROJECT, Version::NAME, game.string());
-	const auto settings = LoadSettings();
-	if (!settings.enabled) {
-		logger::info("bEnabled=0 in the ini, nothing to do");
+		step("game version"sv);
+		const auto game = REL::Module::get().version();
+		logger::info("[{:6.1f} s] {} {} (game {})", Status::Uptime(), Version::PROJECT, Version::NAME, game.string());
+		step("settings"sv);
+		const auto settings = LoadSettings();
+		if (!settings.enabled) {
+			logger::info("bEnabled=0 in the ini, nothing to do");
+			return true;
+		}
+
+		step("state"sv);
+		LoadState();
+		Status::mainThread = GetCurrentThreadId();
+		Sampler::SetSelf(self);
+		step("hooks"sv);
+		InstallHooks(a_skse);
+		step("messaging listener"sv);
+		SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
+		step("overlay"sv);
+		Overlay::Start(settings);
+		step("done"sv);
 		return true;
+	} catch (const std::exception& e) {
+		logger::error("Load failed: {}", e.what());
+	} catch (...) {
+		logger::error("Load failed: unknown exception");
 	}
-
-	LoadState();
-	Status::mainThread = GetCurrentThreadId();
-	Sampler::SetSelf(self);
-	InstallHooks(a_skse);
-	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
-	Overlay::Start(settings);
-	return true;
+	return false;
 }

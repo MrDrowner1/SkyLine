@@ -6,7 +6,7 @@ configure_file(cmake/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/Version.h 
 set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
 find_package(CommonLibSSE CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-add_library(${PROJECT_NAME} SHARED src/main.cpp src/overlay.cpp src/sampler.cpp src/frame.cpp)
+add_library(${PROJECT_NAME} SHARED src/main.cpp src/overlay.cpp src/sampler.cpp src/frame.cpp src/vr.cpp)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_compile_definitions(${PROJECT_NAME} PRIVATE SKYRIM_AE SKYRIM_SUPPORT_AE)
 target_include_directories(${PROJECT_NAME} PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/include)

@@ -1,4 +1,5 @@
 #include "overlay.h"
+#include "vr.h"
 #include "frame.h"
 #include "sampler.h"
 #include "state.h"
@@ -372,20 +373,21 @@ namespace
 		return Measure(headFont, head).cy + second + 2 * Pad() + BarHeight();
 	}
 
-	SIZE BoxSize()
+	// a_limit caps the width instead of the game window, for the headset.
+	SIZE BoxSize(int a_limit = 0)
 	{
 		RECT area{};
 		GetClientRect(game, &area);  // child window: client coordinates
 		const int pad = Pad();
 		if (!settings.barLength) {
-			return { std::max<int>(Px(100), area.right - area.left - 2 * Px(MarginPx)), StatusHeight() };
+			return { a_limit ? a_limit : std::max<int>(Px(100), area.right - area.left - 2 * Px(MarginPx)), StatusHeight() };
 		}
 		if (settings.barOnly) {
 			return { Px(settings.barLength), StatusHeight() };
 		}
 		const auto h1 = Measure(headFont, head);
 		const auto h2 = settings.showDetail ? Measure(detailFont, detail) : SIZE{};
-		const int  maxWidth = std::max<int>(Px(200), (area.right - area.left) * 3 / 4);
+		const int  maxWidth = a_limit ? a_limit : std::max<int>(Px(200), (area.right - area.left) * 3 / 4);
 		width = std::min(std::max<int>({ width, h1.cx + 2 * pad, h2.cx + 2 * pad, Px(settings.barLength) + 2 * pad }), maxWidth);
 		return { width, StatusHeight() };
 	}
@@ -1118,13 +1120,12 @@ namespace
 		TerminateProcess(GetCurrentProcess(), 0);
 	}
 
-	// Premultiplied pixels for the Present hook.
-	void PublishFrame()
+	// The box as premultiplied pixels, a_splashBar shows the splash bar's progress.
+	std::vector<std::uint32_t> BoxPixels(SIZE size, bool a_splashBar)
 	{
-		const auto size = BoxSize();
-		auto       out = TextPixels(size, false);
+		auto out = TextPixels(size, false);
 		if (out.empty()) {
-			return;
+			return out;
 		}
 		const RECT rc{ 0, 0, size.cx, size.cy };
 		// Opaque, so the track stays visible over dark loading screens.
@@ -1137,9 +1138,37 @@ namespace
 			}
 		};
 		put(BarTrack(rc, false), opaque(Track));
-		put(BarFill(rc, false), opaque(settings.barColor));
-		Frame::Publish(std::move(out), size.cx, size.cy, Where());
+		RECT fill = BarTrack(rc, false);
+		fill.right = fill.left + static_cast<LONG>((fill.right - fill.left) * Progress(a_splashBar));
+		put(fill, opaque(settings.barColor));
+		return out;
 	}
+
+	// Premultiplied pixels for the Present hook.
+	void PublishFrame()
+	{
+		const auto size = BoxSize();
+		if (auto out = BoxPixels(size, false); !out.empty()) {
+			Frame::Publish(std::move(out), size.cx, size.cy, Where());
+		}
+	}
+
+#ifdef ENABLE_SKYRIM_VR
+	// The status in the headset, from when the game has started OpenVR until startup ends.
+	void UpdateHeadset()
+	{
+		if (Frame::LastPresent() > 0) {
+			Vr::FirstFrame();
+		}
+		if (!Vr::Due()) {
+			return;
+		}
+		const auto size = BoxSize(Px(Vr::MaxWidthPx));
+		if (const auto out = BoxPixels(size, !windowAt); !out.empty()) {
+			Vr::Show(out, size.cx, size.cy, 100.0f / scalePct);
+		}
+	}
+#endif
 
 	// What made a window that can't be the game window, e.g. another plugin's splash, "" when it can be.
 	std::string ForeignWindow(HWND a_hwnd)
@@ -1278,6 +1307,9 @@ namespace
 		} else if (Status::Uptime() - readyAt > settings.lingerSeconds) {
 			KillTimer(nullptr, timer);
 			Frame::Stop();
+#ifdef ENABLE_SKYRIM_VR
+			Vr::Stop();
+#endif
 			DestroySplash();
 			if (window) {
 				DestroyWindow(window);
@@ -1370,6 +1402,9 @@ namespace
 			Layout();
 			InvalidateRect(window, nullptr, FALSE);
 		}
+#ifdef ENABLE_SKYRIM_VR
+		UpdateHeadset();
+#endif
 	}
 
 	void Run()
